@@ -73,6 +73,9 @@ export async function snapshotOpeningOdds(matchId: string): Promise<void> {
  *
  * If ESPN still has the match in its scoreboard (it usually does for ~24h
  * after kickoff), we grab the latest odds as the closing line.
+ *
+ * D1 upgrade: also appends the closing odds to the oddsSnapshotsJson array
+ * as the final snapshot, so we have a complete open → mid → close timeline.
  */
 export async function snapshotClosingOdds(
   matchExternalId: string,
@@ -85,6 +88,128 @@ export async function snapshotClosingOdds(
   void matchExternalId;
   void matchDate;
   return null;
+}
+
+/**
+ * D1: Snapshot the current ESPN odds for a match and append to the
+ * oddsSnapshotsJson timeline. Called by a mid-day scheduler job so we can
+ * detect line movement (steam moves) between open and close.
+ *
+ * Each snapshot is stored as `{ capturedAt, oddsJson }` in an array. We
+ * keep up to 10 snapshots per match (older ones get dropped).
+ *
+ * Returns the new snapshot count.
+ */
+export async function appendOddsSnapshot(matchId: string, currentOddsJson: string | null): Promise<number> {
+  if (!currentOddsJson) return 0;
+  const match = await db.match.findUnique({
+    where: { id: matchId },
+    select: { oddsSnapshotsJson: true },
+  });
+  if (!match) return 0;
+
+  // Parse existing snapshots
+  let snapshots: Array<{ capturedAt: string; oddsJson: string }> = [];
+  if (match.oddsSnapshotsJson) {
+    try {
+      snapshots = JSON.parse(match.oddsSnapshotsJson) as typeof snapshots;
+    } catch { /* ignore parse errors */ }
+  }
+
+  // Skip if the odds haven't changed since the last snapshot
+  if (snapshots.length > 0 && snapshots[snapshots.length - 1].oddsJson === currentOddsJson) {
+    return snapshots.length;
+  }
+
+  // Append new snapshot
+  snapshots.push({
+    capturedAt: new Date().toISOString(),
+    oddsJson: currentOddsJson,
+  });
+
+  // Keep only the most recent 10 snapshots
+  if (snapshots.length > 10) {
+    snapshots = snapshots.slice(-10);
+  }
+
+  await db.match.update({
+    where: { id: matchId },
+    data: { oddsSnapshotsJson: JSON.stringify(snapshots) },
+  });
+
+  return snapshots.length;
+}
+
+/**
+ * D1: Compute line movement for a match — has the line moved toward or away
+ * from our pick? Used as a small ±0.02 probability nudge in gen1X2.
+ *
+ * Returns:
+ *   - positive value = line moved TOWARD our pick (market agrees with us)
+ *   - negative value = line moved AWAY from our pick (market disagrees)
+ *   - null = not enough snapshots to compute
+ */
+export function computeLineMovement(
+  snapshots: Array<{ capturedAt: string; oddsJson: string }>,
+  oddsKey: string
+): { movePct: number; movedTowardPick: boolean } | null {
+  if (snapshots.length < 2) return null;
+
+  // Parse the first and last snapshots' odds for the given key
+  const parseOdds = (json: string): number | null => {
+    try {
+      const obj = JSON.parse(json) as Record<string, unknown>;
+      const v = obj[oddsKey];
+      return typeof v === "number" && v > 1 ? v : null;
+    } catch { return null; }
+  };
+
+  const openOdds = parseOdds(snapshots[0].oddsJson);
+  const closeOdds = parseOdds(snapshots[snapshots.length - 1].oddsJson);
+  if (!openOdds || !closeOdds) return null;
+
+  // Move = (close - open) / open
+  // If odds got SHORTER (close < open), the market now thinks this outcome
+  // is MORE likely → line moved TOWARD the pick (positive signal).
+  // If odds got LONGER (close > open), the market moved AWAY → negative signal.
+  const movePct = (closeOdds - openOdds) / openOdds;
+  // For "backing" the outcome: shorter odds = good (line moved toward us)
+  // Convert to a "toward pick" signal: negative movePct = toward pick
+  const movedTowardPick = movePct < 0;
+  return { movePct, movedTowardPick };
+}
+
+/**
+ * D1: Snapshot odds for all matches on a given date that haven't kicked off yet.
+ * Called by a mid-day scheduler job (typically 14:00 Brussels) so we can
+ * detect line movement (steam moves) between open and close.
+ *
+ * Re-fetches ESPN odds for each match and appends to oddsSnapshotsJson.
+ * Only matches that haven't kicked off yet are snapshotted (no point in
+ * snapshotting finished matches).
+ */
+export async function snapshotOddsForDate(dateStr: string): Promise<{
+  matchesSnapshotted: number;
+}> {
+  // Load all matches for this date that haven't kicked off yet
+  const now = new Date();
+  const matches = await db.match.findMany({
+    where: {
+      matchDate: dateStr,
+      kickoffUtc: { gt: now },
+      status: { not: "finished" },
+    },
+    select: { id: true, oddsJson: true },
+  });
+
+  let matchesSnapshotted = 0;
+  for (const m of matches) {
+    if (!m.oddsJson) continue;
+    const count = await appendOddsSnapshot(m.id, m.oddsJson);
+    if (count > 0) matchesSnapshotted++;
+  }
+
+  return { matchesSnapshotted };
 }
 
 /**

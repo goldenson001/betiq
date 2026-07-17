@@ -4,9 +4,10 @@
  * Takes the engine's per-match predictions and builds FOUR daily parlay tiers
  * calibrated for different risk appetites:
  *
- *   1. safest      — 2-3 legs, each leg probability >= 0.75. Target: ~70-85%
- *                    combined win probability. For investors who want high
- *                    win-rate, low-variance returns.
+ *   1. safest      — 2-3 legs, each leg probability >= SAFEST_MIN_LEG_PROB
+ *                    (default 0.80) AND consensusSources >= SAFEST_MIN_LEG_SOURCES
+ *                    (default 2). Target: ~50-65% combined win probability.
+ *                    For investors who want high win-rate, low-variance returns.
  *   2. medium_risk — 3-4 legs, each leg probability >= 0.55. Target: ~25-50%
  *                    combined win probability. Balanced growth.
  *   3. high_risk   — 4-5 legs, each leg probability >= 0.40. Target: ~5-20%
@@ -18,12 +19,20 @@
  * Each parlay also gets a Kelly criterion stake (1/8 fraction, capped at 2%
  * of bankroll — parlays are much higher variance than single bets).
  *
+ * B4 upgrade: Correlation-aware Kelly. Parlay legs are NOT actually
+ * independent — same-league same-day legs share referee/weather/pitch
+ * conditions, and 3+ legs within a 2-hour window share pitch-weather
+ * correlation. We apply a haircut to combinedProbability before computing
+ * Kelly, so effective stake shrinks for correlated parlays.
+ *
  * Persists all four parlays to DB. Idempotent: clears existing parlays for
  * the date before re-creating.
  */
 
 import { db } from "@/lib/db";
 import { kellyParlay as kellyParlayStake, type KellyResult } from "@/lib/learning/kelly";
+import { correlationHaircut } from "@/lib/learning/risk";
+import { ENGINE_CONFIG } from "@/lib/config";
 
 interface ParlayLeg {
   predictionId: string;
@@ -34,6 +43,9 @@ interface ParlayLeg {
   odds: number;
   probability: number;
   confidence: number;
+  // ── B4: Correlation inputs ──────────────────────────────────────────────
+  leagueId?: string | null;
+  kickoffUtc?: Date | string | null;
 }
 
 interface ParlayCandidate {
@@ -42,18 +54,35 @@ interface ParlayCandidate {
   combinedOdds: number;
   confidence: number; // 0-100
   expectedValue: number;
+  // ── B4: Correlation diagnostics ──────────────────────────────────────────
+  correlationHaircutMultiplier?: number; // 1.0 = no haircut, 0.5 = halved
+  rawCombinedProbability?: number; // before haircut
 }
 
 function evaluateParlay(legs: ParlayLeg[]): ParlayCandidate {
-  const combinedProbability = legs.reduce((p, l) => p * l.probability, 1);
+  const rawCombinedProbability = legs.reduce((p, l) => p * l.probability, 1);
   const combinedOdds = legs.reduce((o, l) => o * l.odds, 1);
+  // ── B4: Apply correlation haircut ──────────────────────────────────────
+  // The independence assumption (Π p_i) over-estimates win probability when
+  // legs are correlated. Apply a haircut based on same-league pairs and
+  // time-clustered legs. Haircut is multiplied INTO the combined probability.
+  const haircutMult = correlationHaircut(legs);
+  const combinedProbability = rawCombinedProbability * haircutMult;
   const expectedValue = combinedOdds * combinedProbability - 1;
   // Confidence for parlays is a blend: combined probability * sqrt(num legs)
   // (so a 4-leg parlay with 0.7 each leg doesn't get a tiny confidence score)
   const numLegsFactor = Math.sqrt(legs.length);
   const rawConfidence = combinedProbability * numLegsFactor * 0.6 + Math.min(0.4, expectedValue + 0.5);
   const confidence = Math.max(5, Math.min(95, Math.round(rawConfidence * 100)));
-  return { legs, combinedProbability, combinedOdds, confidence, expectedValue };
+  return {
+    legs,
+    combinedProbability,
+    combinedOdds,
+    confidence,
+    expectedValue,
+    correlationHaircutMultiplier: legs.length >= 2 ? haircutMult : undefined,
+    rawCombinedProbability: legs.length >= 2 ? rawCombinedProbability : undefined,
+  };
 }
 
 /**
@@ -63,6 +92,10 @@ function evaluateParlay(legs: ParlayLeg[]): ParlayCandidate {
  *
  * Excludes combo / synthetic markets (bet_builder, win_btts, correct_score)
  * since these overlap with base markets and would double-count signal.
+ *
+ * B3 upgrade: optional `minConsensus` requires each leg to have at least N
+ * independent sources agreeing. Used by the safest tier to enforce multi-
+ * source consensus (no single-source "safe" legs).
  */
 function buildGreedyParlay(
   allLegs: ParlayLeg[],
@@ -70,12 +103,14 @@ function buildGreedyParlay(
     maxLegs: number;
     minLegProb: number;
     minCombinedProb: number;
+    minConsensus?: number;
   }
 ): ParlayCandidate {
   const EXCLUDED = new Set(["bet_builder", "win_btts", "correct_score", "htft"]);
   const eligible = allLegs
     .filter((l) => !EXCLUDED.has(l.market))
     .filter((l) => l.probability >= opts.minLegProb)
+    .filter((l) => (opts.minConsensus ?? 0) <= 0 || (l as { consensusSources?: number }).consensusSources !== undefined && (l as { consensusSources?: number }).consensusSources! >= (opts.minConsensus ?? 0))
     .sort((a, b) => b.probability * b.confidence - a.probability * a.confidence);
   if (eligible.length === 0) {
     return evaluateParlay([]);
@@ -179,6 +214,14 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         odds: p.bookOdds ?? p.fairOdds,
         probability: p.probability,
         confidence: p.confidence,
+        // ── B4: Correlation inputs ─────────────────────────────────────────
+        leagueId: m.leagueId ?? null,
+        kickoffUtc: m.kickoffUtc,
+        // ── B3: For consensus requirement (stored on the prediction row) ────
+        // We attach consensusSources via a side channel so the greedy builder
+        // can filter on it. The ParlayLeg type doesn't include it, but
+        // buildGreedyParlay accesses it via cast.
+        ...({ consensusSources: p.consensusSources ?? 0 } as object),
       });
     }
   }
@@ -187,7 +230,19 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
     return { safest: null, mediumRisk: null, highRisk: null, megaOdds: null };
   }
 
-  const safest = buildGreedyParlay(allLegs, { maxLegs: 3, minLegProb: 0.75, minCombinedProb: 0.35 });
+  // B3: Tightened safest tier — minLegProb from SAFEST_MIN_LEG_PROB (default 0.80,
+  // was 0.75), minConsensus from SAFEST_MIN_LEG_SOURCES (default 2, was 0).
+  // This raises the safest-tier win rate to investment-grade (~50%+ combined prob
+  // for 3 legs at 0.80³ = 0.51, vs old 0.75³ = 0.42).
+  const safest = buildGreedyParlay(
+    allLegs,
+    {
+      maxLegs: 3,
+      minLegProb: ENGINE_CONFIG.SAFEST_MIN_LEG_PROB,
+      minCombinedProb: 0.35,
+      minConsensus: ENGINE_CONFIG.SAFEST_MIN_LEG_SOURCES,
+    }
+  );
   const mediumRisk = buildGreedyParlay(allLegs, { maxLegs: 4, minLegProb: 0.55, minCombinedProb: 0.08 });
   const highRisk = buildGreedyParlay(allLegs, { maxLegs: 5, minLegProb: 0.40, minCombinedProb: 0.015 });
   const megaOdds = buildMegaOddsParlay(allLegs);

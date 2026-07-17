@@ -24,6 +24,12 @@ export interface PredictionView {
   isSafeHighOdds?: boolean;
   /** Number of distinct sources agreeing on this pick. */
   consensusSources?: number;
+  /**
+   * C2: Source disagreement — stdev of per-source probabilities for this pick.
+   * Low (< 0.08) = sources agree (reliable), high (> 0.15) = sources disagree
+   * ("lottery 62%" picks). Undefined when sources don't expose probabilities.
+   */
+  disagreement?: number | null;
   sourcesJson: string | null;
   /** Kelly criterion recommended stake (fraction of bankroll, 0-0.05). Null if not computed. */
   recommendedStake?: number | null;
@@ -34,6 +40,26 @@ export interface PredictionView {
   correct?: boolean | null;
 }
 
+/**
+ * C2: Render a small 3-dot indicator showing source disagreement.
+ *   Green  (●●●) = stdev < 0.08 — sources agree (reliable)
+ *   Amber (●●○) = stdev 0.08-0.15 — moderate disagreement
+ *   Red    (●○○) = stdev > 0.15 — strong disagreement (lottery pick)
+ */
+function DisagreementIndicator({ disagreement }: { disagreement: number }) {
+  const level = disagreement < 0.08 ? "agree" : disagreement < 0.15 ? "moderate" : "disagree";
+  const color = level === "agree" ? "text-emerald-500" : level === "moderate" ? "text-amber-500" : "text-rose-500";
+  const label = level === "agree" ? "Sources agree" : level === "moderate" ? "Sources differ" : "Sources disagree";
+  return (
+    <span
+      className={`text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded border ${color} border-current/40`}
+      title={`${label} (stdev ${(disagreement * 100).toFixed(1)}%)`}
+    >
+      {level === "agree" ? "AGREE" : level === "moderate" ? "MIXED" : "SPLIT"}
+    </span>
+  );
+}
+
 export function PredictionRow({ p, compact = false }: { p: PredictionView; compact?: boolean }) {
   const isValue = p.isValueBet;
   const isTop = p.isTopPick;
@@ -42,6 +68,7 @@ export function PredictionRow({ p, compact = false }: { p: PredictionView; compa
   const hasKelly = p.recommendedStake !== undefined && p.recommendedStake !== null && p.recommendedStake > 0;
   const hasClv = p.clv !== undefined && p.clv !== null;
   const consensus = p.consensusSources ?? 0;
+  const hasDisagreement = p.disagreement !== undefined && p.disagreement !== null;
   return (
     <div
       className={cn(
@@ -83,6 +110,8 @@ export function PredictionRow({ p, compact = false }: { p: PredictionView; compa
               {consensus}× CONSENSUS
             </span>
           )}
+          {/* C2: Source disagreement indicator */}
+          {hasDisagreement && <DisagreementIndicator disagreement={p.disagreement!} />}
           {hasKelly && (
             <span className="text-[9px] font-bold uppercase tracking-wider text-blue-950 bg-blue-300 px-1 py-0.5 rounded">
               KELLY {formatKelly(p.recommendedStake)}

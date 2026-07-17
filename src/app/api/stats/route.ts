@@ -146,6 +146,18 @@ export async function GET(req: NextRequest) {
     leagueCounts.set(name, (leagueCounts.get(name) ?? 0) + 1);
   }
 
+  // ── C1: Load drawdown state + today's total exposure for the bankroll sim ──
+  const drawdownRow = await db.modelState.findUnique({ where: { key: "drawdown_state" } });
+  let drawdownState: "normal" | "degraded" | "halted" = "normal";
+  if (drawdownRow) {
+    if (drawdownRow.value >= 2) drawdownState = "halted";
+    else if (drawdownRow.value >= 1) drawdownState = "degraded";
+  }
+  // Today's total exposure = sum of recommendedStake across all bets today
+  const todayExposure = predictions
+    .filter((p) => (p.isTopPick || p.isValueBet) && p.recommendedStake !== null && p.recommendedStake > 0)
+    .reduce((sum, p) => sum + (p.recommendedStake ?? 0), 0);
+
   return NextResponse.json({
     ok: true,
     date,
@@ -158,6 +170,14 @@ export async function GET(req: NextRequest) {
       valueBetsCount: allValueByMatch.size,
       safePicksCount: allSafeByMatch.size,
       safeHighOddsCount: predictions.filter((p) => p.isSafeHighOdds).length,
+    },
+    // ── C1: Risk gate info for the bankroll simulator + UI banner ──────────────
+    riskGate: {
+      drawdownState,
+      drawdownReason: drawdownRow?.notes ?? null,
+      todayExposure,
+      maxExposure: 0.15, // matches ENGINE_CONFIG.DAILY_MAX_EXPOSURE
+      portfolioScale: todayExposure > 0.15 ? 0.15 / todayExposure : 1.0,
     },
     leagueCounts: Array.from(leagueCounts.entries()).map(([name, count]) => ({ name, count })),
     topPicks: topPicks.map((p) => ({
@@ -222,6 +242,7 @@ export async function GET(req: NextRequest) {
       edge: p.edge,
       isSafePick: p.isSafePick,
       consensusSources: p.consensusSources,
+      disagreement: p.disagreement,
       recommendedStake: p.recommendedStake,
       clv: p.clv,
     })),

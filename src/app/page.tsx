@@ -30,11 +30,13 @@ import {
   Info,
   Shield,
   Clock,
+  AlertTriangle,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MatchCard, type MatchView } from "@/components/dashboard/match-card";
 import { MatchDetailDialog, type MatchDetailView } from "@/components/dashboard/match-detail";
 import { ParlayCard, type ParlayView, parlayTypeOrder } from "@/components/dashboard/parlay-card";
+import { BankrollSimulator } from "@/components/dashboard/bankroll-simulator";
 import {
   PerformanceDashboard,
   type SnapshotView,
@@ -115,6 +117,14 @@ interface StatsResponse {
     safePicksCount: number;
     safeHighOddsCount: number;
   };
+  // C1: Risk gate info from the engine (B1 + B2)
+  riskGate?: {
+    drawdownState: "normal" | "degraded" | "halted";
+    drawdownReason: string | null;
+    todayExposure: number;
+    maxExposure: number;
+    portfolioScale: number;
+  };
   leagueCounts: Array<{ name: string; count: number }>;
   topPicks: Array<{
     id: string;
@@ -178,6 +188,7 @@ interface StatsResponse {
     edge: number | null;
     isSafePick?: boolean;
     consensusSources?: number;
+    disagreement?: number | null;
     recommendedStake?: number | null;
     clv?: number | null;
   }>;
@@ -423,6 +434,53 @@ export default function Home() {
           </div>
         </div>
 
+        {/* C3: Drawdown / risk-gate banner — appears when drawdownState != normal */}
+        {statsQuery.data?.riskGate && statsQuery.data.riskGate.drawdownState !== "normal" && (
+          <div className={
+            "rounded-lg border px-3 py-2 text-xs flex items-start gap-2 " +
+            (statsQuery.data.riskGate.drawdownState === "halted"
+              ? "border-rose-500 bg-rose-500/10"
+              : "border-amber-500 bg-amber-500/10")
+          }>
+            <AlertTriangle className={
+              "h-3.5 w-3.5 mt-0.5 shrink-0 " +
+              (statsQuery.data.riskGate.drawdownState === "halted"
+                ? "text-rose-600 dark:text-rose-400"
+                : "text-amber-600 dark:text-amber-400")
+            } />
+            <div className={
+              statsQuery.data.riskGate.drawdownState === "halted"
+                ? "text-rose-900 dark:text-rose-200"
+                : "text-amber-900 dark:text-amber-200"
+            }>
+              <strong className="font-semibold">
+                {statsQuery.data.riskGate.drawdownState === "halted" ? "Model halted." : "Model in degraded mode."}
+              </strong>{" "}
+              {statsQuery.data.riskGate.drawdownReason ?? "Stakes reduced for capital preservation."}
+              {statsQuery.data.riskGate.drawdownState === "degraded" && (
+                <> Recommended stakes are running at 50% of full Kelly. </>
+              )}
+              {statsQuery.data.riskGate.drawdownState === "halted" && (
+                <> All recommended stakes are zeroed until the model recovers. </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* C1: Portfolio daily exposure banner — appears when portfolio cap is engaged */}
+        {statsQuery.data?.riskGate && statsQuery.data.riskGate.portfolioScale < 1.0 && (
+          <div className="rounded-lg border border-blue-400/40 bg-blue-400/10 px-3 py-2 text-xs flex items-start gap-2">
+            <Shield className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 mt-0.5 shrink-0" />
+            <div className="text-blue-900 dark:text-blue-200">
+              <strong className="font-semibold">Portfolio cap engaged.</strong>{" "}
+              Today&apos;s total exposure ({(statsQuery.data.riskGate.todayExposure * 100).toFixed(1)}%)
+              exceeds the {(statsQuery.data.riskGate.maxExposure * 100).toFixed(0)}% daily cap.
+              All stakes scaled to {(statsQuery.data.riskGate.portfolioScale * 100).toFixed(0)}% of Kelly for
+              capital preservation.
+            </div>
+          </div>
+        )}
+
         {/* Date navigator */}
         <Card className="overflow-hidden">
           <CardContent className="p-3 sm:p-4 flex items-center gap-3 flex-wrap">
@@ -461,6 +519,65 @@ export default function Home() {
             >
               Today
             </Button>
+            {/* C3: Tomorrow + weekend quick-nav chips */}
+            <div className="flex items-center gap-1">
+              {(() => {
+                const today = parseISO(brusselsToday());
+                const tomorrow = format(addDays(today, 1), "yyyy-MM-dd");
+                // Find next Saturday and Sunday from today
+                let saturday = today;
+                let sunday = today;
+                while (saturday.getDay() !== 6) saturday = addDays(saturday, 1);
+                while (sunday.getDay() !== 0) sunday = addDays(sunday, 1);
+                const satStr = format(saturday, "yyyy-MM-dd");
+                const sunStr = format(sunday, "yyyy-MM-dd");
+                const monday = format(addDays(sunday, 1), "yyyy-MM-dd");
+                const chips = [
+                  { label: "Tomorrow", date: tomorrow, today: false },
+                  { label: "Sat", date: satStr, today: satStr === brusselsToday() },
+                  { label: "Sun", date: sunStr, today: sunStr === brusselsToday() },
+                  { label: "Mon", date: monday, today: false },
+                ];
+                return chips.map((c) => (
+                  <Button
+                    key={c.label}
+                    variant={date === c.date ? "default" : "ghost"}
+                    size="sm"
+                    className="text-xs h-8 px-2"
+                    onClick={() => setDate(c.date)}
+                  >
+                    {c.label}
+                  </Button>
+                ));
+              })()}
+            </div>
+            {/* C3: Data freshness pill — green if any source scraped < 6h ago */}
+            {statsQuery.data?.sources && statsQuery.data.sources.length > 0 && (() => {
+              const sources = statsQuery.data.sources;
+              const lastScraped = sources
+                .map((s) => s.lastScrapedAt ? new Date(s.lastScrapedAt).getTime() : 0)
+                .reduce((max, t) => Math.max(max, t), 0);
+              const ageHours = lastScraped > 0 ? (Date.now() - lastScraped) / (1000 * 60 * 60) : Infinity;
+              const fresh = ageHours < 6;
+              const stale = ageHours > 24;
+              return (
+                <Badge
+                  variant="outline"
+                  className={
+                    "text-xs gap-1 " +
+                    (fresh
+                      ? "border-emerald-400 text-emerald-700 dark:text-emerald-300"
+                      : stale
+                        ? "border-rose-400 text-rose-700 dark:text-rose-300"
+                        : "border-amber-400 text-amber-700 dark:text-amber-300")
+                  }
+                  title={`Last scrape: ${lastScraped > 0 ? new Date(lastScraped).toLocaleString() : "never"}`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                  {fresh ? "Fresh" : stale ? "Stale" : "Aging"}
+                </Badge>
+              );
+            })()}
             <div className="flex items-center gap-3 ml-auto flex-wrap">
               <Badge variant="secondary" className="gap-1 text-xs">
                 <Globe className="h-3 w-3" />
@@ -707,6 +824,7 @@ export default function Home() {
                         isSafePick: v.isSafePick,
                         isSafeHighOdds: true,
                         consensusSources: v.consensusSources,
+                        disagreement: v.disagreement,
                         sourcesJson: null,
                         recommendedStake: v.recommendedStake,
                         clv: v.clv,
@@ -918,7 +1036,14 @@ export default function Home() {
           </TabsContent>
 
           {/* Performance tab */}
-          <TabsContent value="performance" className="mt-4">
+          <TabsContent value="performance" className="mt-4 space-y-4">
+            {/* C1: Bankroll Simulator — always visible at the top of Performance tab */}
+            <BankrollSimulator
+              snapshots={performanceQuery.data?.snapshots ?? []}
+              todayExposure={statsQuery.data?.riskGate?.todayExposure}
+              drawdownState={statsQuery.data?.riskGate?.drawdownState}
+              drawdownReason={statsQuery.data?.riskGate?.drawdownReason ?? undefined}
+            />
             {performanceQuery.isLoading ? (
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 {Array.from({ length: 4 }).map((_, i) => (

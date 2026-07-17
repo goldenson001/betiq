@@ -90,6 +90,14 @@ export interface EnginePrediction {
    * by the post-process pass; individual gen* functions may omit it.
    */
   consensusSources?: number;
+  /**
+   * Source disagreement — standard deviation of per-source probabilities for
+   * this pick. Low (< 0.08) = sources agree, high (> 0.15) = sources disagree
+   * ("lottery 62%" picks where one source says 95% and three say 50%).
+   * Used by the safe-high-odds filter to exclude unreliable picks.
+   * Computed only for markets where sources expose probabilities (1X2).
+   */
+  disagreement?: number;
   sources: { source: string; pick: string; weight: number }[];
 }
 

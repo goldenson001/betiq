@@ -15,6 +15,7 @@ import { db } from "@/lib/db";
 import { fitPlatt, brierScore, type PlattParams } from "./calibration";
 import { kelly as kellyStake } from "./kelly";
 import { computeClvForDate } from "./clv";
+import { updateEloRatingsForDate } from "./elo";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Result evaluation
@@ -46,19 +47,39 @@ function evaluateDoubleChance(r: MatchResult, selection: string): boolean {
   return false;
 }
 
-function evaluateDnb(r: MatchResult, selection: string): boolean {
+function evaluateDnb(
+  r: MatchResult,
+  selection: string,
+  homeTeam?: string,
+  awayTeam?: string
+): boolean {
   // Selection like "Arsenal DNB" — win if team wins, push (treated as not-loss)
   // on draw, lose if other team wins. For feedback, push is treated as
   // half-correct — but since we report boolean correct, push counts as "not
   // loss" = true (the stake is refunded, no capital lost).
   const actual = r.homeScore > r.awayScore ? "1" : r.homeScore < r.awayScore ? "2" : "X";
   if (actual === "X") return true; // push = stake returned, treated as "not loss"
-  // We don't have team names in MatchResult reliably — use the heuristic that
-  // the engine picks the favored side (typically home) unless the selection
-  // string contains "away". The selection is "<TeamName> DNB" so a team like
-  // "Away United" could trigger a false positive, but this is rare.
-  const sel = selection.toLowerCase();
-  const isHomeDnb = !sel.includes("away");
+  // ── D2 fix: was previously using a "selection contains 'away'" heuristic ──
+  // that mis-classified away teams whose name doesn't contain "away" (i.e.,
+  // almost all of them). Now we compare the team name extracted from the
+  // selection against homeTeam/awayTeam and fall back to the home-by-default
+  // heuristic only if team names aren't available.
+  const sel = selection.replace(/\s+DNB$/i, "").trim().toLowerCase();
+  const home = homeTeam?.toLowerCase();
+  const away = awayTeam?.toLowerCase();
+  let isHomeDnb: boolean;
+  if (home && away) {
+    // Match if selection contains the team name (handles "Arsenal DNB", "Arsenal F.C. DNB", etc.)
+    if (sel.includes(home)) isHomeDnb = true;
+    else if (sel.includes(away)) isHomeDnb = false;
+    else {
+      // Fallback: can't determine — assume the engine's pick (home side favored)
+      isHomeDnb = true;
+    }
+  } else {
+    // No team context — fall back to home-by-default (engine usually picks favorite)
+    isHomeDnb = true;
+  }
   if (isHomeDnb) return actual === "1";
   return actual === "2";
 }
@@ -85,22 +106,49 @@ function evaluateCorrectScore(r: MatchResult, selection: string): boolean {
   return `${r.homeScore}-${r.awayScore}` === selection;
 }
 
-function evaluateAsianHandicap(r: MatchResult, selection: string): boolean {
+function evaluateAsianHandicap(
+  r: MatchResult,
+  selection: string,
+  homeTeam?: string,
+  awayTeam?: string
+): boolean {
   // selection like "Arsenal -1.5" or "Chelsea +0.5"
   // Parse team and line
   const m = selection.match(/^(.+?)\s([+-]?\d+(?:\.\d+)?)$/);
   if (!m) return false;
-  const team = m[1].trim();
+  const team = m[1].trim().toLowerCase();
   const line = parseFloat(m[2]);
-  // Determine if team is home or away — we don't have team names here, so use
-  // a heuristic: positive line means underdog (often away), negative means
-  // favorite (often home). We use a tie-breaking rule based on sign.
-  // For accuracy, we evaluate against the home team by default.
-  // (Real implementation would pass team context through.)
-  const homeMargin = r.homeScore - r.awayScore + line;
-  if (homeMargin > 0) return true;
-  if (homeMargin < 0) return false;
-  // Push — counts as half-win, simplified to true
+
+  // ── D2 fix: was previously assuming the team is always the home side ──────
+  // (using a "positive line = underdog = away" heuristic). This is wrong for
+  // any away team pick. Now we compare the team name extracted from the
+  // selection against homeTeam/awayTeam and fall back to home-by-default
+  // only if team names aren't available.
+  let isHome: boolean;
+  const home = homeTeam?.toLowerCase();
+  const away = awayTeam?.toLowerCase();
+  if (home && away) {
+    if (team.includes(home) || home.includes(team)) isHome = true;
+    else if (team.includes(away) || away.includes(team)) isHome = false;
+    else {
+      // Fallback: can't determine — assume home (engine usually picks favorite
+      // for AH, which is typically home).
+      isHome = true;
+    }
+  } else {
+    // No team context — fall back to home-by-default
+    isHome = true;
+  }
+
+  // Compute the margin from this team's perspective.
+  // If home team with line -1.5: homeMargin = homeGoals - awayGoals + line (line is negative)
+  // If away team with line +0.5:  awayMargin = awayGoals - homeGoals + line (line is positive)
+  const teamGoals = isHome ? r.homeScore : r.awayScore;
+  const oppGoals = isHome ? r.awayScore : r.homeScore;
+  const margin = teamGoals - oppGoals + line;
+  if (margin > 0) return true;
+  if (margin < 0) return false;
+  // Push — counts as half-win, simplified to true (stake refunded)
   return true;
 }
 
@@ -124,18 +172,23 @@ function evaluateCardsOu(r: MatchResult, selection: string): boolean {
   return (sel === "over") === over;
 }
 
-function evaluatePrediction(p: { market: string; selection: string }, r: MatchResult): boolean {
+function evaluatePrediction(
+  p: { market: string; selection: string },
+  r: MatchResult,
+  homeTeam?: string,
+  awayTeam?: string
+): boolean {
   switch (p.market) {
     case "1x2": return evaluate1X2(r, p.selection);
     case "double_chance": return evaluateDoubleChance(r, p.selection);
-    case "dnb": return evaluateDnb(r, p.selection);
+    case "dnb": return evaluateDnb(r, p.selection, homeTeam, awayTeam);
     case "htft": return evaluateHtFt(r, p.selection);
     case "btts": return evaluateBtts(r, p.selection);
     case "ou15": return evaluateOu(r, 1.5, p.selection);
     case "ou25": return evaluateOu(r, 2.5, p.selection);
     case "ou35": return evaluateOu(r, 3.5, p.selection);
     case "correct_score": return evaluateCorrectScore(r, p.selection);
-    case "asian_handicap": return evaluateAsianHandicap(r, p.selection);
+    case "asian_handicap": return evaluateAsianHandicap(r, p.selection, homeTeam, awayTeam);
     case "corners_ou": return evaluateCornersOu(r, p.selection);
     case "cards_ou": return evaluateCardsOu(r, p.selection);
     case "corners_first":
@@ -283,7 +336,12 @@ export async function processResultsForDate(dateStr: string): Promise<{
         // Skip markets we don't auto-evaluate
         continue;
       }
-      const correct = evaluatePrediction({ market: p.market, selection: p.selection }, result);
+      const correct = evaluatePrediction(
+        { market: p.market, selection: p.selection },
+        result,
+        match.homeTeam,
+        match.awayTeam
+      );
       await db.prediction.update({
         where: { id: p.id },
         data: { evaluated: true, correct },
@@ -485,6 +543,23 @@ export async function processResultsForDate(dateStr: string): Promise<{
     console.warn("[feedback] CLV computation failed:", err);
   }
 
+  // ── B3: Update per-(market, league) rolling CLV ───────────────────────────
+  // For each prediction on this date with CLV computed, attribute it to its
+  // (market, league) pair. Used by the engine to EXCLUDE investment-grade
+  // picks on combos where we systematically lose to the closing line.
+  try {
+    await updateMarketLeagueClv(dateStr);
+  } catch (err) {
+    console.warn("[feedback] MarketLeagueClv update failed:", err);
+  }
+
+  // ── A2: Update Elo team ratings for finished matches ──────────────────────
+  try {
+    await updateEloRatingsForDate(dateStr);
+  } catch (err) {
+    console.warn("[feedback] Elo update failed:", err);
+  }
+
   // Evaluate parlays
   const parlays = await db.parlay.findMany({ where: { matchDate: dateStr, evaluated: false } });
   for (const parlay of parlays) {
@@ -510,7 +585,7 @@ export async function processResultsForDate(dateStr: string): Promise<{
         corners: legMatch.corners ?? undefined,
         cards: legMatch.cards ?? undefined,
       };
-      const won = evaluatePrediction(leg, r);
+      const won = evaluatePrediction(leg, r, legMatch.homeTeam, legMatch.awayTeam);
       if (!won) {
         anyLost = true;
         allWon = false;
@@ -646,4 +721,87 @@ export async function runFeedbackLoopForUnprocessedDates(): Promise<{
     await processResultsForDate(d);
   }
   return { datesProcessed: dates };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B3: Per-(market, league) rolling CLV
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Update the MarketLeagueClv table with CLV samples from a given date.
+ *
+ * For each prediction on this date with CLV computed, attribute the CLV to
+ * its (market, league) pair. We keep a rolling window of 30 samples per pair
+ * and recompute the average.
+ *
+ * This is used by the engine to EXCLUDE investment-grade picks on combos
+ * where we systematically lose to the closing line.
+ */
+async function updateMarketLeagueClv(dateStr: string): Promise<void> {
+  const preds = await db.prediction.findMany({
+    where: {
+      match: { matchDate: dateStr },
+      clv: { not: null },
+    },
+    include: { match: true },
+  });
+
+  // Group CLV samples by (market, leagueId)
+  const byKey = new Map<string, { market: string; leagueId: string; samples: number[] }>();
+  for (const p of preds) {
+    if (p.clv === null) continue;
+    // Use "none" sentinel when leagueId is null (Prisma compound key requires non-null)
+    const lid = p.match.leagueId ?? "none";
+    const key = `${p.market}|${lid}`;
+    const entry = byKey.get(key) ?? {
+      market: p.market,
+      leagueId: lid,
+      samples: [],
+    };
+    entry.samples.push(p.clv);
+    byKey.set(key, entry);
+  }
+
+  for (const { market, leagueId, samples } of byKey.values()) {
+    // Load existing row to combine samples (rolling window of 30)
+    const existing = await db.marketLeagueClv.findUnique({
+      where: { market_leagueId: { market, leagueId } },
+    });
+    const existingSamples: number[] = existing
+      ? (() => { try { return JSON.parse(existing.samplesJson ?? "[]") as number[]; } catch { return []; } })()
+      : [];
+    const combined = [...existingSamples, ...samples].slice(-30);
+    const avgClv = combined.reduce((s, x) => s + x, 0) / Math.max(1, combined.length);
+
+    await db.marketLeagueClv.upsert({
+      where: { market_leagueId: { market, leagueId } },
+      create: {
+        market,
+        leagueId,
+        avgClv,
+        sampleCount: combined.length,
+        samplesJson: JSON.stringify(combined),
+      },
+      update: {
+        avgClv,
+        sampleCount: combined.length,
+        samplesJson: JSON.stringify(combined),
+      },
+    });
+  }
+}
+
+/**
+ * Load the per-(market, league) rolling CLV into a Map for fast lookup.
+ * Key: `${market}|${leagueId ?? "none"}`. Value: avgClv.
+ *
+ * Used by the engine at prediction time to gate investment-grade picks.
+ */
+export async function loadMarketLeagueClvMap(): Promise<Map<string, number>> {
+  const rows = await db.marketLeagueClv.findMany();
+  const map = new Map<string, number>();
+  for (const r of rows) {
+    map.set(`${r.market}|${r.leagueId ?? "none"}`, r.avgClv);
+  }
+  return map;
 }

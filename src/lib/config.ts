@@ -105,6 +105,89 @@ export const ENGINE_CONFIG = {
   // its weight by up to this fraction.
   CLV_WEIGHT_BOOST: num("CLV_WEIGHT_BOOST", 0.20, 0.0, 1.0),
 
+  // ── Portfolio-level daily Kelly cap (B1) ───────────────────────────────────
+  // Maximum total bankroll exposure across ALL top picks + value bets + safe
+  // high-odds picks on a single day. When the sum of per-pick recommended
+  // stakes exceeds this fraction, every stake is scaled down pro-rata so the
+  // total equals the cap. Default 15% — busy Saturdays can stake 40%+ without
+  // this gate, which violates the user's capital-preservation priority.
+  //
+  // Set to 1.0 to disable (legacy behavior — no portfolio cap).
+  DAILY_MAX_EXPOSURE: num("DAILY_MAX_EXPOSURE", 0.15, 0.05, 1.0),
+
+  // ── Drawdown circuit breaker (B2) ──────────────────────────────────────────
+  // When the model is in a bad regime, automatically reduce staking.
+  // Three states managed by computePerformanceSnapshot in feedback.ts:
+  //
+  //   "normal"   → stakes at full Kelly (already fractional)
+  //   "degraded" → stakes × DRAWDOWN_DEGRADED_FACTOR (default 0.5 = halve)
+  //                Triggered by 7-day loseStreak ≥ DRAWDOWN_DEGRADED_STREAK
+  //                (default 5) OR rolling drawdown ≥ DRAWDOWN_DEGRADED_PCT
+  //                (default 10%).
+  //   "halted"   → stakes = 0 (predictions still generated, no stake recommended)
+  //                Triggered by drawdown ≥ DRAWDOWN_HALT_PCT (default 20%).
+  //
+  // Recovery: "degraded" / "halted" → "normal" after
+  // DRAWDOWN_RECOVERY_WIN_DAYS (default 3) consecutive winning days.
+  DRAWDOWN_DEGRADED_STREAK: num("DRAWDOWN_DEGRADED_STREAK", 5, 2, 15),
+  DRAWDOWN_DEGRADED_PCT: num("DRAWDOWN_DEGRADED_PCT", 0.10, 0.03, 0.40),
+  DRAWDOWN_HALT_PCT: num("DRAWDOWN_HALT_PCT", 0.20, 0.05, 0.50),
+  DRAWDOWN_DEGRADED_FACTOR: num("DRAWDOWN_DEGRADED_FACTOR", 0.5, 0.1, 1.0),
+  DRAWDOWN_RECOVERY_WIN_DAYS: num("DRAWDOWN_RECOVERY_WIN_DAYS", 3, 1, 10),
+
+  // ── CLV gate for safest tier + safe-high-odds (B3) ─────────────────────────
+  // Per-(market, league) rolling CLV threshold. Picks on (market, league)
+  // combos where the engine's trailing CLV is below this value are EXCLUDED
+  // from the safe-high-odds tier AND from the safest parlay tier.
+  //
+  // Default −0.01 — only excludes markets where we systematically lose to
+  // the closing line. Set to 0.0 for stricter (only positive-CLV markets).
+  MARKET_LEAGUE_MIN_CLV: num("MARKET_LEAGUE_MIN_CLV", -0.01, -0.20, 0.10),
+
+  // Tightened safest parlay leg requirements — investment-grade positioning.
+  // Old: minLegProb 0.75. New: 0.80 + minimum 2 sources per leg.
+  SAFEST_MIN_LEG_PROB: num("SAFEST_MIN_LEG_PROB", 0.80, 0.55, 0.95),
+  SAFEST_MIN_LEG_SOURCES: num("SAFEST_MIN_LEG_SOURCES", 2, 1, 5),
+
+  // ── Goal model (A1) ─────────────────────────────────────────────────────────
+  // Dixon-Coles low-score correlation parameter. ρ = -0.05 is the canonical
+  // value for soccer (slight under-representation of 0-0, 1-0, 0-1 scores).
+  DC_RHO: num("DC_RHO", -0.05, -0.20, 0.20),
+  // Weight given to the goal-model prior when blending with tipster consensus.
+  // 0 = ignore goal model (legacy behavior), 1 = pure goal model.
+  GOALMODEL_PRIOR_WEIGHT: num("GOALMODEL_PRIOR_WEIGHT", 0.30, 0.0, 1.0),
+
+  // ── Elo team-strength prior (A2) ───────────────────────────────────────────
+  // K-factor for Elo updates (higher = more volatile). 20 is standard for
+  // club soccer.
+  ELO_K: num("ELO_K", 20, 5, 60),
+  // Home-field advantage in Elo rating points. 65 ≈ 0.18 in probability.
+  ELO_HOME_ADVANTAGE: num("ELO_HOME_ADVANTAGE", 65, 0, 200),
+  // Weight given to Elo prior when blending with tipster consensus.
+  ELO_PRIOR_WEIGHT: num("ELO_PRIOR_WEIGHT", 0.20, 0.0, 1.0),
+
+  // ── Rest-day / fixture-congestion (A3) ─────────────────────────────────────
+  // Per-team penalty applied when rest < REST_PENALTY_THRESHOLD days.
+  // Each day below threshold → REST_PENALTY_PER_DAY probability reduction
+  // (capped at REST_PENALTY_MAX).
+  REST_PENALTY_THRESHOLD: num("REST_PENALTY_THRESHOLD", 3, 1, 10),
+  REST_PENALTY_PER_DAY: num("REST_PENALTY_PER_DAY", 0.012, 0.0, 0.05),
+  REST_PENALTY_MAX: num("REST_PENALTY_MAX", 0.06, 0.0, 0.15),
+
+  // ── Correlation-aware parlay Kelly (B4) ────────────────────────────────────
+  // Haircut on combined parlay probability when legs are correlated.
+  // Same-league same-date legs → PARLAY_SAME_LEAGUE_HAIRCUT (default 0.10).
+  // 3+ legs within 2-hour window → PARLAY_TIME_CLUSTER_HAIRCUT (default 0.05).
+  PARLAY_SAME_LEAGUE_HAIRCUT: num("PARLAY_SAME_LEAGUE_HAIRCUT", 0.10, 0.0, 0.50),
+  PARLAY_TIME_CLUSTER_HAIRCUT: num("PARLAY_TIME_CLUSTER_HAIRCUT", 0.05, 0.0, 0.30),
+  PARLAY_TIME_CLUSTER_HOURS: num("PARLAY_TIME_CLUSTER_HOURS", 2, 1, 12),
+
+  // ── Source disagreement (C2) ───────────────────────────────────────────────
+  // Maximum stdev across per-source probabilities for a pick to be eligible
+  // for the safe-high-odds tier. Default 0.15 — filters "lottery 62%" picks
+  // (one source 95%, three sources 50%) from investment-grade recommendations.
+  SAFE_HIGH_ODDS_MAX_DISAGREEMENT: num("SAFE_HIGH_ODDS_MAX_DISAGREEMENT", 0.15, 0.02, 0.40),
+
   // ── Diagnostics ────────────────────────────────────────────────────────────
   LOG_ENGINE_DECISIONS: bool("LOG_ENGINE_DECISIONS", false),
 } as const;

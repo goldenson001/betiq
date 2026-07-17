@@ -14,6 +14,7 @@ import { runAllScrapers } from "@/lib/scrapers/orchestrator";
 import { generatePredictionsForDate } from "@/lib/prediction/engine";
 import { buildAndPersistParlays } from "@/lib/confidence/engine";
 import { runFeedbackLoopForUnprocessedDates } from "@/lib/learning/feedback";
+import { snapshotOddsForDate } from "@/lib/learning/clv";
 import { brusselsDateString } from "@/lib/time/brussels";
 import { db } from "@/lib/db";
 import { PrismaClientInitializationError } from "@prisma/client/runtime/library";
@@ -100,6 +101,11 @@ export async function GET(req: NextRequest) {
         create: { key: "last_feedback_run_date", value: Number(Date.now()), notes: new Date().toISOString() },
         update: { value: Number(Date.now()), notes: new Date().toISOString() },
       });
+      return NextResponse.json({ ok: true, phase, date, result });
+    }
+    // D1: snapshot phase — capture mid-day odds for steam-move detection
+    if (phase === "snapshot") {
+      const result = await snapshotOddsForDate(date);
       return NextResponse.json({ ok: true, phase, date, result });
     }
     // all

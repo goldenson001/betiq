@@ -72,6 +72,50 @@ model SourceLeagueCalibration {
   @@index([leagueId])
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Per-(market, league) rolling CLV — used by B3 (CLV gate for safest tier +
+// safe-high-odds picks). If the engine systematically loses to the closing
+// line on a particular (market, league) combo (e.g. corners_ou in Premier
+// League), picks on that combo are EXCLUDED from investment-grade tiers.
+// ──────────────────────────────────────────────────────────────────────────────
+model MarketLeagueClv {
+  id          String   @id @default(cuid())
+  market      String
+  leagueId    String   @default("none")
+  // Rolling 30-day mean CLV across all predictions on this (market, league).
+  // Positive = beats closing line (good). Negative = loses to closing line.
+  avgClv      Float    @default(0)
+  sampleCount Int      @default(0)
+  samplesJson String?  // Array of recent CLV samples for recompute
+  lastUpdated DateTime @updatedAt
+
+  @@unique([market, leagueId])
+  @@index([market])
+  @@index([leagueId])
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Elo team-strength ratings (A2). Updated after every finished match.
+// Used as a bookmaker-independent prior for 1X2 prediction in low-coverage
+// matches (lower leagues, cup games, early season).
+// ──────────────────────────────────────────────────────────────────────────────
+model TeamRating {
+  id          String   @id @default(cuid())
+  teamName    String
+  leagueId    String   @default("none")
+  // Elo rating — typical range 1200-2200, mean ~1500.
+  rating      Float    @default(1500)
+  // Number of matches the rating is based on (for confidence).
+  matches     Int      @default(0)
+  // Last-5 form derived from Elo updates (W/D/L string).
+  form        String?
+  lastUpdated DateTime @updatedAt
+
+  @@unique([teamName, leagueId])
+  @@index([teamName])
+  @@index([leagueId])
+}
+
 model League {
   id        String   @id @default(cuid())
   name      String   @unique
@@ -115,10 +159,21 @@ model Match {
   // clvComputed:      true once CLV has been computed for this match's top picks
   openingOddsJson String?
   closingOddsJson String?
+  // ── D1: Mid-week odds snapshots for steam-move detection ──────────────────
+  // Array of { capturedAt, oddsJson } snapshots. Updated by a mid-day
+  // scheduler job so we can detect line movement between open and close.
+  oddsSnapshotsJson String?
   clvComputed     Boolean  @default(false)
   h2hJson     String?
+  // ── A3: Home/away-split form + rest days ──────────────────────────────────
+  // homeForm/awayForm are the existing last-5 overall form strings. New fields
+  // split by venue + track rest days for fixture-congestion penalty.
   homeForm    String?
   awayForm    String?
+  homeVenueForm String?
+  awayVenueForm String?
+  restDaysHome  Int?
+  restDaysAway  Int?
   resultProcessed Boolean @default(false)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -164,20 +219,17 @@ model Prediction {
   // ── Safer-pick flag — true when this is the lower-risk side of its market ──
   isSafePick      Boolean  @default(false)
   // ── Safest High-Odds tier — investment-grade picks with odds in 1.50–2.50 ──
-  // True when this pick combines higher odds with all safety precautions:
-  // multi-source consensus, strong edge, positive Kelly, safe market.
-  // Stricter subset of isValueBet. Surfaced in the dedicated "Safe High-Odds"
-  // tab so users can find higher-odds investment-grade picks at a glance.
   isSafeHighOdds   Boolean  @default(false)
   // ── Consensus strength — number of distinct sources agreeing on this pick ──
   consensusSources Int     @default(0)
+  // ── C2: Source disagreement — stdev of per-source probabilities for this pick ──
+  // Low = sources agree (reliable), high = sources disagree (lottery).
+  // Used by safe-high-odds filter to exclude high-disagreement picks.
+  disagreement Float?
   // ── Kelly criterion staking ──────────────────────────────────────────────
-  // kellyFraction:   full Kelly stake (0-1) — fraction of bankroll
-  // recommendedStake: fractional Kelly (default 1/4) clamped to [0, 0.05]
   kellyFraction   Float?
   recommendedStake Float?
   // ── Closing Line Value for this individual prediction ─────────────────────
-  // (only populated for top picks and value bets)
   clv             Float?
   sourcesJson String?
   evaluated   Boolean  @default(false)
