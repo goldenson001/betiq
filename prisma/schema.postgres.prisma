@@ -1,5 +1,6 @@
-// Football Predictions Platform — Prisma Schema (SQLite)
-// Used in local dev when DATABASE_URL starts with "file:".
+// Football Predictions Platform — Prisma Schema (PostgreSQL)
+// Used in production (Vercel) and any environment where DATABASE_URL
+// points at a PostgreSQL database.
 // Auto-selected by scripts/select-schema.mjs.
 
 generator client {
@@ -7,7 +8,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

@@ -3,15 +3,16 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
-    "build": "prisma generate && next build",
+    "dev": "node scripts/select-schema.mjs && next dev -p 3000",
+    "build": "node scripts/select-schema.mjs && prisma generate && next build",
     "postbuild": "node scripts/postbuild.mjs",
     "start": "NODE_ENV=production node .next/standalone/server.js",
     "lint": "eslint .",
-    "db:push": "prisma db push",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset"
+    "presync": "node scripts/select-schema.mjs",
+    "db:push": "node scripts/select-schema.mjs && prisma db push",
+    "db:generate": "node scripts/select-schema.mjs && prisma generate",
+    "db:migrate": "node scripts/select-schema.mjs && prisma migrate dev",
+    "db:reset": "node scripts/select-schema.mjs && prisma migrate reset"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
