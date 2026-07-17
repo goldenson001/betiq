@@ -58,6 +58,9 @@ server.log
 /db/*.db
 /db/*.db-journal
 
+# Generated Prisma schema (auto-selected from schema.sqlite.prisma / schema.postgres.prisma)
+/prisma/schema.prisma
+
 # Tool results / scratch
 /tool-results/
 /.zscripts/
