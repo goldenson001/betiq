@@ -196,6 +196,13 @@ export async function processResultsForDate(dateStr: string): Promise<{
   // Per-source (predicted prob, actual outcome) pairs — used to fit Platt
   // scaling params so each source's probabilities become well-calibrated.
   const calibrationSamples = new Map<string, Array<{ pred: number; actual: number }>>();
+  // Per-(source, league) samples — used to fit per-league Platt params.
+  // Key: `${sourceId}|${leagueId}`. Falls back to global if league is null.
+  const leagueCalibrationSamples = new Map<string, Array<{ pred: number; actual: number }>>();
+  // Per-source Brier samples for rolling 30-day reliability metric.
+  const sourceBrierSamples = new Map<string, Array<{ pred: number; actual: number }>>();
+  // Per-source CLV samples for rolling 30-day metric.
+  const sourceClvSamples = new Map<string, number[]>();
   // Daily Brier score samples (across all engine predictions) — measures
   // calibration quality of the overall ensemble.
   const brierSamples: Array<{ pred: number; actual: number }> = [];
@@ -288,12 +295,45 @@ export async function processResultsForDate(dateStr: string): Promise<{
         if (probs) {
           const pred = rp.predicted1X2 === "1" ? probs.home : rp.predicted1X2 === "2" ? probs.away : probs.draw;
           if (pred !== undefined && pred > 0 && pred < 1) {
+            const sample = { pred, actual: correct ? 1 : 0 };
+            // Global source calibration
             const arr = calibrationSamples.get(rp.sourceId) ?? [];
-            arr.push({ pred, actual: correct ? 1 : 0 });
+            arr.push(sample);
             calibrationSamples.set(rp.sourceId, arr);
+            // Per-(source, league) calibration
+            if (match.leagueId) {
+              const key = `${rp.sourceId}|${match.leagueId}`;
+              const larr = leagueCalibrationSamples.get(key) ?? [];
+              larr.push(sample);
+              leagueCalibrationSamples.set(key, larr);
+            }
+            // Per-source rolling Brier samples
+            const barr = sourceBrierSamples.get(rp.sourceId) ?? [];
+            barr.push(sample);
+            sourceBrierSamples.set(rp.sourceId, barr);
           }
         }
       } catch { /* payload parse failure — skip calibration sample */ }
+    }
+
+    // ── Per-source CLV sample collection ──────────────────────────────────────
+    // For each top pick / value bet on this match, if we have CLV computed,
+    // attribute it to the contributing sources (from sourcesJson).
+    for (const p of match.predictions) {
+      if (!p.evaluated || p.clv === null || p.clv === undefined) continue;
+      if (!p.isTopPick && !p.isValueBet) continue;
+      try {
+        const srcs = JSON.parse(p.sourcesJson ?? "[]") as Array<{ source?: string }>;
+        // Look up source IDs from source name (we stored names in sourcesJson)
+        for (const s of srcs) {
+          if (!s.source) continue;
+          const src = await db.source.findUnique({ where: { name: s.source } });
+          if (!src) continue;
+          const arr = sourceClvSamples.get(src.id) ?? [];
+          arr.push(p.clv);
+          sourceClvSamples.set(src.id, arr);
+        }
+      } catch { /* ignore parse errors */ }
     }
 
     await db.match.update({
@@ -302,7 +342,8 @@ export async function processResultsForDate(dateStr: string): Promise<{
     });
   }
 
-  // Update source accuracy, weights, and Platt calibration params
+  // Update source accuracy, weights, Platt calibration params, AND rolling
+  // reliability metrics (Brier, CLV) for source weighting.
   for (const [sourceId, u] of sourceUpdates.entries()) {
     const source = await db.source.findUnique({ where: { id: sourceId } });
     if (!source) continue;
@@ -331,30 +372,80 @@ export async function processResultsForDate(dateStr: string): Promise<{
       plattA = params.a;
       plattB = params.b;
       plattN = combined.length;
-      await db.source.update({
-        where: { id: sourceId },
-        data: {
-          totalPredictions: newTotal,
-          correctPredictions: newCorrect,
-          accuracy: newAccuracy,
-          weight: newWeight,
-          calibrationA: plattA,
-          calibrationB: plattB,
-          calibrationN: plattN,
-          calibrationJson: JSON.stringify(combined),
-        },
-      });
-    } else {
-      await db.source.update({
-        where: { id: sourceId },
-        data: {
-          totalPredictions: newTotal,
-          correctPredictions: newCorrect,
-          accuracy: newAccuracy,
-          weight: newWeight,
-        },
-      });
     }
+
+    // ── Rolling Brier (30-day window) ────────────────────────────────────────
+    // Compute from today's samples (already in sourceBrierSamples).
+    const brierSamplesToday = sourceBrierSamples.get(sourceId) ?? [];
+    const brier30d = brierSamplesToday.length > 0
+      ? brierScore(brierSamplesToday)
+      : source.brier30d; // no new data — keep previous
+
+    // ── Rolling CLV (today's average) ────────────────────────────────────────
+    const clvToday = sourceClvSamples.get(sourceId) ?? [];
+    const clv30d = clvToday.length > 0
+      ? clvToday.reduce((s, x) => s + x, 0) / clvToday.length
+      : source.clv30d;
+
+    const recentSamples = source.recentSamples + brierSamplesToday.length;
+
+    await db.source.update({
+      where: { id: sourceId },
+      data: {
+        totalPredictions: newTotal,
+        correctPredictions: newCorrect,
+        accuracy: newAccuracy,
+        weight: newWeight,
+        calibrationA: plattA,
+        calibrationB: plattB,
+        calibrationN: plattN,
+        calibrationJson: samples.length >= 10
+          ? JSON.stringify([...(JSON.parse(source.calibrationJson ?? "[]") as Array<{ pred: number; actual: number }>), ...samples].slice(-500))
+          : source.calibrationJson,
+        brier30d,
+        clv30d,
+        recentSamples,
+      },
+    });
+  }
+
+  // ── Per-league Platt calibration fitting ───────────────────────────────────
+  // For each (sourceId, leagueId) we collected samples for, fit Platt params
+  // and upsert into SourceLeagueCalibration. We keep a rolling window of 200
+  // samples per (source, league) pair — smaller than the global 500 because
+  // per-league samples are sparser.
+  for (const [key, samples] of leagueCalibrationSamples.entries()) {
+    const [sourceId, leagueId] = key.split("|");
+    if (!sourceId || !leagueId) continue;
+    if (samples.length < 5) continue; // need at least a few samples to bother
+    // Load existing row (if any) to combine samples
+    const existing = await db.sourceLeagueCalibration.findUnique({
+      where: { sourceId_leagueId: { sourceId, leagueId } },
+    });
+    const existingSamples: Array<{ pred: number; actual: number }> = (() => {
+      try { return JSON.parse(existing?.samplesJson ?? "[]") as Array<{ pred: number; actual: number }>; }
+      catch { return []; }
+    })();
+    const combined = [...existingSamples, ...samples].slice(-200);
+    if (combined.length < 10) continue; // not enough to fit reliably
+    const params = fitPlatt(combined);
+    await db.sourceLeagueCalibration.upsert({
+      where: { sourceId_leagueId: { sourceId, leagueId } },
+      create: {
+        sourceId,
+        leagueId,
+        calibrationA: params.a,
+        calibrationB: params.b,
+        sampleCount: combined.length,
+        samplesJson: JSON.stringify(combined),
+      },
+      update: {
+        calibrationA: params.a,
+        calibrationB: params.b,
+        sampleCount: combined.length,
+        samplesJson: JSON.stringify(combined),
+      },
+    });
   }
 
   // Compute CLV for top picks & value bets on this date

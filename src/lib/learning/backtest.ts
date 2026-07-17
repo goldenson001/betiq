@@ -31,7 +31,12 @@
  */
 
 import { db } from "@/lib/db";
-import { buildPredictionsForMatch, reconstituteRaw, type MatchContext } from "@/lib/prediction/engine";
+import {
+  buildPredictionsForMatch,
+  reconstituteRaw,
+  reliabilityAdjustedWeight,
+  type MatchContext,
+} from "@/lib/prediction/engine";
 import type { EnginePrediction } from "@/lib/types";
 import { brierScore } from "./calibration";
 import { kelly, kellyParlay } from "./kelly";
@@ -255,13 +260,28 @@ async function backtestSingleDate(dateStr: string): Promise<BacktestDayResult> {
       matchId: match.id,
       homeTeam: match.homeTeam,
       awayTeam: match.awayTeam,
+      leagueId: match.leagueId,
       homeForm: match.homeForm,
       awayForm: match.awayForm,
       rawPredictions: match.rawPredictions.map((rp) => ({
         sourceId: rp.sourceId,
         sourceName: rp.source.name,
-        weight: rp.source.weight,
+        weight: reliabilityAdjustedWeight({
+          baseWeight: rp.source.weight,
+          brier30d: rp.source.brier30d,
+          clv30d: rp.source.clv30d,
+          recentSamples: rp.source.recentSamples,
+        }),
         prediction: reconstituteRaw(rp),
+        // In production the engine re-fetches per-league calibration in bulk;
+        // here we just pass the source-global params (already loaded via source).
+        // The engine's MatchContext.calibrationA/B overrides will be undefined,
+        // which buildPredictionsForMatch handles gracefully (identity Platt).
+        calibrationA: rp.source.calibrationA,
+        calibrationB: rp.source.calibrationB,
+        brier30d: rp.source.brier30d,
+        clv30d: rp.source.clv30d,
+        recentSamples: rp.source.recentSamples,
       })),
     };
     const enginePreds = buildPredictionsForMatch(ctx);

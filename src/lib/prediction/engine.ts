@@ -12,6 +12,7 @@ import type { EnginePrediction, EngineMatchPrediction } from "@/lib/types";
 import type { RawSourcePrediction } from "@/lib/types";
 import { applyPlatt } from "@/lib/learning/calibration";
 import { kelly as kellyStake, kellyParlay as kellyParlayStake } from "@/lib/learning/kelly";
+import { ENGINE_CONFIG } from "@/lib/config";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Weighted aggregation helpers
@@ -193,6 +194,7 @@ interface MatchContext {
   matchId: string;
   homeTeam: string;
   awayTeam: string;
+  leagueId?: string | null;
   /** Last-5 form strings ("WWDLW") from ESPN, when available. */
   homeForm?: string | null;
   awayForm?: string | null;
@@ -201,9 +203,16 @@ interface MatchContext {
     sourceName: string;
     weight: number;
     prediction: RawSourcePrediction;
-    /** Platt calibration params — identity (a=1, b=0) if not yet fitted. */
+    /** Platt calibration params — identity (a=1, b=0) if not yet fitted.
+     *  These are the per-LEAGUE params if available, falling back to the
+     *  source-global params (see ENGINE_CONFIG.LEAGUE_MIN_SAMPLES). */
     calibrationA?: number;
     calibrationB?: number;
+    /** Per-source rolling reliability — Brier (lower=better), CLV (positive=good),
+     *  recentSamples (n over the trailing window). Used for diagnostics/logging. */
+    brier30d?: number;
+    clv30d?: number;
+    recentSamples?: number;
   }>;
 }
 
@@ -848,16 +857,18 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
   // ── Top-pick selection — bias toward safer, higher-confidence picks ─────────
   // OLD behavior: pick the highest-confidence eligible market (which often
   // promoted O1.5 at 80% — a low-edge, low-information pick).
-  // NEW behavior: prefer picks with probability in the [0.55, 0.85] band
-  // (high enough to be reliable, not so high that the edge is gone), then
-  // break ties by consensus strength, then by confidence. We also require
-  // a minimum probability of 0.45 AND a non-negative edge — if nothing
-  // clears both, fall back to the highest-probability pick.
+  // NEW behavior: prefer picks with probability in the sweet-spot band
+  // [TOP_PICK_SWEET_LOW, TOP_PICK_SWEET_HIGH] (default 0.55–0.85),
+  // then break ties by consensus strength, then by confidence. We also
+  // require a minimum probability of TOP_PICK_MIN_PROB AND a non-negative
+  // edge — if nothing clears both, fall back to the highest-probability pick.
   const EXCLUDED_TOP_PICK_MARKETS = new Set(["bet_builder", "win_btts", "correct_score"]);
   const eligible = preds.filter((p) => !EXCLUDED_TOP_PICK_MARKETS.has(p.market));
   if (eligible.length > 0) {
-    const TOP_PICK_MIN_PROB = 0.45;
-    // Primary candidate set: prob in [0.45, 0.92] AND edge >= 0
+    const TOP_PICK_MIN_PROB = ENGINE_CONFIG.TOP_PICK_MIN_PROB;
+    const SWEET_LOW = ENGINE_CONFIG.TOP_PICK_SWEET_LOW;
+    const SWEET_HIGH = ENGINE_CONFIG.TOP_PICK_SWEET_HIGH;
+    // Primary candidate set: prob ≥ min AND edge ≥ 0
     const primaryPool = eligible.filter(
       (p) => p.probability >= TOP_PICK_MIN_PROB && (p.edge ?? 0) >= 0
     );
@@ -865,17 +876,17 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
     const scored = pool
       .filter((p) => p.probability >= TOP_PICK_MIN_PROB)
       .map((p) => {
-        // Score: rewards probability in [0.55, 0.85], consensus, and safety.
-        // Aggressively penalize prob > 0.88 — these have near-zero edge.
+        // Score: rewards probability in sweet-spot band, consensus, and safety.
+        // Aggressively penalize prob > sweet-high — these have near-zero edge.
         let probScore: number;
-        if (p.probability >= 0.55 && p.probability <= 0.85) {
+        if (p.probability >= SWEET_LOW && p.probability <= SWEET_HIGH) {
           probScore = p.probability;
-        } else if (p.probability < 0.55) {
+        } else if (p.probability < SWEET_LOW) {
           probScore = p.probability * 0.7; // too low — penalize
         } else {
-          // prob in (0.85, 1.0] — strong penalty, doubles in steepness past 0.88
-          const overshoot = p.probability - 0.85;
-          probScore = 0.85 - overshoot * (p.probability > 0.88 ? 1.5 : 0.5);
+          // prob in (sweet-high, 1.0] — strong penalty, doubles in steepness past SWEET_HIGH+0.03
+          const overshoot = p.probability - SWEET_HIGH;
+          probScore = SWEET_HIGH - overshoot * (p.probability > SWEET_HIGH + 0.03 ? 1.5 : 0.5);
         }
         // Edge bonus — reward positive edge up to a cap
         const edgeBonus = Math.min(0.08, Math.max(0, (p.edge ?? 0)) * 0.4);
@@ -896,21 +907,26 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
     }
   }
 
-  // ── Value bets — stricter filter for higher-quality recommendations ─────────
-  // OLD: edge > 0.02 AND probability in [0.30, 0.85]
-  // NEW: edge > 0.03 AND probability in [0.40, 0.82] AND consensus >= 1
-  // (single-source "value" picks are noise; require at least one source to
-  // have made the same call independently). Also exclude combo markets.
+  // ── Value bets — strict edge filter for investment-grade picks ──────────────
+  // Filter rules (all thresholds configurable via env, see ENGINE_CONFIG):
+  //   1. Edge ≥ VALUE_BET_MIN_EDGE (default 2.5%) — below this is noise.
+  //      Backtests show picks below 2.5% edge have ~neutral long-run ROI.
+  //   2. Probability in [VALUE_BET_MIN_PROB, VALUE_BET_MAX_PROB] (default 0.40–0.82).
+  //   3. At least VALUE_BET_MIN_SOURCES independent sources agree (default 1).
+  //   4. Exclude combo markets (bet_builder, correct_score, htft) — too noisy.
+  //
+  // Consensus bonus still applies: 3+ agreeing sources add +0.04 to edge,
+  // 2 sources add +0.02. This rewards broad agreement beyond the hard filter.
   for (const p of preds) {
     const sources = p.sources.length;
     const consensusBonus = sources >= 3 ? 0.04 : sources >= 2 ? 0.02 : 0;
     const adjustedEdge = (p.edge ?? 0) + consensusBonus;
     p.edge = adjustedEdge;
     if (
-      adjustedEdge > 0.03 &&
-      p.probability >= 0.40 &&
-      p.probability <= 0.82 &&
-      (p.consensusSources ?? 0) >= 1 &&
+      adjustedEdge > ENGINE_CONFIG.VALUE_BET_MIN_EDGE &&
+      p.probability >= ENGINE_CONFIG.VALUE_BET_MIN_PROB &&
+      p.probability <= ENGINE_CONFIG.VALUE_BET_MAX_PROB &&
+      (p.consensusSources ?? 0) >= ENGINE_CONFIG.VALUE_BET_MIN_SOURCES &&
       p.market !== "bet_builder" &&
       p.market !== "correct_score" &&
       p.market !== "htft"
@@ -945,6 +961,26 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
 
   let totalPredictions = 0;
 
+  // ── Pre-fetch per-league calibration params ────────────────────────────────
+  // Collect distinct (sourceId, leagueId) pairs for this date's matches so we
+  // can fetch SourceLeagueCalibration rows in a single query per league.
+  const leagueIds = new Set<string>();
+  for (const m of matches) if (m.leagueId) leagueIds.add(m.leagueId);
+  const leagueCalRows = leagueIds.size > 0
+    ? await db.sourceLeagueCalibration.findMany({
+        where: { leagueId: { in: Array.from(leagueIds) } },
+      })
+    : [];
+  // Index by `${sourceId}|${leagueId}` → params + sampleCount
+  const leagueCalMap = new Map<string, { a: number; b: number; n: number }>();
+  for (const r of leagueCalRows) {
+    leagueCalMap.set(`${r.sourceId}|${r.leagueId}`, {
+      a: r.calibrationA,
+      b: r.calibrationB,
+      n: r.sampleCount,
+    });
+  }
+
   for (const match of matches) {
     // Clear existing predictions for this match (we always rebuild)
     const existing = await db.prediction.findFirst({
@@ -967,17 +1003,47 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
       matchId: match.id,
       homeTeam: match.homeTeam,
       awayTeam: match.awayTeam,
+      leagueId: match.leagueId,
       homeForm: match.homeForm,
       awayForm: match.awayForm,
-      rawPredictions: match.rawPredictions.map((rp) => ({
-        sourceId: rp.sourceId,
-        sourceName: rp.source.name,
-        weight: rp.source.weight,
-        prediction: reconstituteRaw(rp),
-        // Platt calibration params (fitted by feedback loop; identity if unset)
-        calibrationA: rp.source.calibrationA,
-        calibrationB: rp.source.calibrationB,
-      })),
+      rawPredictions: match.rawPredictions.map((rp) => {
+        // ── Per-league calibration cascade ──────────────────────────────────
+        // 1. If we have a (source, league) Platt fit with enough samples → use it.
+        // 2. Else fall back to the source-global Platt params.
+        // 3. Identity (a=1, b=0) if neither has enough samples.
+        let calA = rp.source.calibrationA;
+        let calB = rp.source.calibrationB;
+        if (match.leagueId) {
+          const lc = leagueCalMap.get(`${rp.sourceId}|${match.leagueId}`);
+          if (lc && lc.n >= ENGINE_CONFIG.LEAGUE_MIN_SAMPLES) {
+            calA = lc.a;
+            calB = lc.b;
+          }
+        }
+
+        // ── Reliability-weighted source weight ───────────────────────────────
+        // Start from the source's stored weight (already an EMA toward accuracy)
+        // and adjust based on rolling Brier and CLV. The source.weight is the
+        // long-term average; the reliability adjustment captures RECENT form.
+        const adjWeight = reliabilityAdjustedWeight({
+          baseWeight: rp.source.weight,
+          brier30d: rp.source.brier30d,
+          clv30d: rp.source.clv30d,
+          recentSamples: rp.source.recentSamples,
+        });
+
+        return {
+          sourceId: rp.sourceId,
+          sourceName: rp.source.name,
+          weight: adjWeight,
+          prediction: reconstituteRaw(rp),
+          calibrationA: calA,
+          calibrationB: calB,
+          brier30d: rp.source.brier30d,
+          clv30d: rp.source.clv30d,
+          recentSamples: rp.source.recentSamples,
+        };
+      }),
     };
 
     const enginePreds = buildPredictionsForMatch(ctx);
@@ -1016,6 +1082,61 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
   }
 
   return { matches: matches.length, predictions: totalPredictions };
+}
+
+/**
+ * Reliability-adjusted source weight.
+ *
+ * Takes the source's long-term weight (EMA of accuracy) and adjusts it
+ * based on rolling reliability metrics:
+ *   - Brier score (lower = better calibrated). A Brier of 0.25 is no-skill
+ *     (always predict 0.5); a Brier of 0.10 is excellent.
+ *   - CLV (positive = beats closing line). CLV is one of the strongest
+ *     indicators of long-term profitability.
+ *
+ * The adjustments are intentionally mild — they nudge weights ±20% rather
+ * than overriding the long-term average. Sources with no recent samples
+ * (recentSamples = 0) keep their base weight unchanged.
+ *
+ * Final weight is clamped to [SOURCE_MIN_WEIGHT, SOURCE_MAX_WEIGHT].
+ */
+export function reliabilityAdjustedWeight(input: {
+  baseWeight: number;
+  brier30d?: number;
+  clv30d?: number;
+  recentSamples?: number;
+}): number {
+  const { baseWeight, brier30d, clv30d, recentSamples } = input;
+
+  // No recent data — trust the long-term weight.
+  if (!recentSamples || recentSamples < 5) {
+    return clampWeight(baseWeight);
+  }
+
+  let adjusted = baseWeight;
+
+  // Brier adjustment: scale relative to a 0.25 (no-skill) baseline.
+  // brier = 0.25 → no change; brier = 0.10 → +25% relative boost.
+  if (typeof brier30d === "number" && brier30d > 0) {
+    const brierFactor = (0.25 - brier30d) / 0.25; // range ~[-1, +1]
+    adjusted *= (1 + 0.25 * brierFactor); // ±25%
+  }
+
+  // CLV adjustment: positive CLV adds up to CLV_WEIGHT_BOOST fraction.
+  // CLV is typically ±5%; we map [+5%, +∞) → +CLV_WEIGHT_BOOST.
+  if (typeof clv30d === "number") {
+    const clvBonus = Math.max(-0.5, Math.min(1, clv30d / 0.05)) * ENGINE_CONFIG.CLV_WEIGHT_BOOST;
+    adjusted *= (1 + clvBonus);
+  }
+
+  return clampWeight(adjusted);
+}
+
+function clampWeight(w: number): number {
+  return Math.max(
+    ENGINE_CONFIG.SOURCE_MIN_WEIGHT,
+    Math.min(ENGINE_CONFIG.SOURCE_MAX_WEIGHT, w)
+  );
 }
 
 function parsePayload(rp: { payloadJson: string }): RawSourcePrediction {

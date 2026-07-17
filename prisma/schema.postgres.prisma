@@ -33,12 +33,43 @@ model Source {
   calibrationB  Float    @default(0)
   calibrationN  Int      @default(0)
   calibrationJson String?
+  // ── Rolling reliability metrics ───────────────────────────────────────────
+  // Trailing Brier score (lower = better) and CLV (positive = beats closing
+  // line). Updated by the feedback loop after each match day. Used by the
+  // engine to weight sources: bad recent form → downweight.
+  brier30d      Float    @default(0.25)
+  clv30d        Float    @default(0)
+  recentSamples Int      @default(0)
   lastScrapedAt DateTime?
   enabled       Boolean  @default(true)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   predictions RawPrediction[]
+  leagueCalibrations SourceLeagueCalibration[]
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Per-league calibration — each source can be well-calibrated on the Premier
+// League but poorly calibrated on Serie B. This table stores separate Platt
+// params for each (source, league) pair, fitted from samples collected in
+// the feedback loop.
+// ──────────────────────────────────────────────────────────────────────────────
+model SourceLeagueCalibration {
+  id          String   @id @default(cuid())
+  sourceId    String
+  source      Source   @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  leagueId    String
+  league      League   @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  // Platt params — identity (a=1, b=0) until enough samples accumulate.
+  calibrationA Float   @default(1)
+  calibrationB Float   @default(0)
+  sampleCount  Int     @default(0)
+  samplesJson  String?
+  lastUpdated  DateTime @updatedAt
+
+  @@unique([sourceId, leagueId])
+  @@index([leagueId])
 }
 
 model League {
@@ -48,6 +79,7 @@ model League {
   code      String?
   createdAt DateTime @default(now())
   matches   Match[]
+  sourceCalibrations SourceLeagueCalibration[]
 }
 
 model Team {
