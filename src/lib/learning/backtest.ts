@@ -33,6 +33,7 @@
 import { db } from "@/lib/db";
 import {
   buildPredictionsForMatch,
+  parseMarketOdds,
   reconstituteRaw,
   reliabilityAdjustedWeight,
   type MatchContext,
@@ -263,6 +264,9 @@ async function backtestSingleDate(dateStr: string): Promise<BacktestDayResult> {
       leagueId: match.leagueId,
       homeForm: match.homeForm,
       awayForm: match.awayForm,
+      // Pass through real market odds so backtest reflects production
+      // (engine uses real odds when available, falls back to synthesized).
+      marketOdds: parseMarketOdds(match.oddsJson),
       rawPredictions: match.rawPredictions.map((rp) => ({
         sourceId: rp.sourceId,
         sourceName: rp.source.name,

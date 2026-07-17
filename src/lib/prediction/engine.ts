@@ -164,22 +164,131 @@ function fairOdds(prob: number): number {
 }
 
 /**
- * Realistic bookmaker odds.
+ * Realistic bookmaker odds — synthesized when no real market odds are available.
  *
- * In real markets, bookmakers build in a margin (overround) of ~5-8%. So for
- * a probability p, book odds ≈ (1/p) × (1 - margin). However for very high
- * probabilities (>0.9), naive margin math gives odds below 1.0 which is
- * nonsensical. We therefore:
- *   - Cap the implied probability at 0.92 (bookies rarely offer implied >92%)
- *   - Apply a margin that scales DOWN with probability (longshots get more margin)
- *   - Ensure odds are always >= 1.02
+ * In real markets, bookmakers build in a margin (overround) that varies by
+ * market type:
+ *   - Asian Handicap / DNB: 1-2% margin (sharpest markets)
+ *   - Over/Under:           3-4% margin
+ *   - 1X2:                  4-5% margin (Pinnacle ~2.5%, soft books ~5-6%)
+ *   - BTTS:                 4-5% margin
+ *   - Correct Score:        6-8% margin (highest — many outcomes)
+ *
+ * The OLD code applied 5-10% margin uniformly, which was too high and caused
+ * every pick to show negative edge (we were comparing fair odds with no margin
+ * against book odds with 7% margin — so every pick looked 7% worse than reality).
+ *
+ * Margin scales DOWN with probability (short-priced favorites get less margin
+ * because bookmakers compete on price for popular picks; longshots get more
+ * margin because their odds are noisy and less price-sensitive).
+ *
+ * For very high probabilities (>0.95), naive margin math gives odds below 1.0
+ * which is nonsensical — we cap implied probability at 0.95 and floor odds at 1.02.
  */
-function bookOdds(prob: number): number {
-  const capped = Math.min(0.92, Math.max(0.05, prob));
-  // Margin: 8% for short-priced, 5% for longshots
-  const margin = 0.05 + (1 - capped) * 0.05;
+function bookOdds(prob: number, market: string = "1x2"): number {
+  const capped = Math.min(0.95, Math.max(0.05, prob));
+  // Base margin by market — sharper markets have less margin
+  const baseMargin = MARKET_MARGINS[market] ?? 0.05;
+  // Margin scales down with probability: longshots get +2%, short-priced gets -1%
+  const marginAdj = Math.max(-0.01, (1 - capped) * 0.03);
+  const margin = Math.max(0.01, baseMargin + marginAdj);
   const raw = (1 / capped) * (1 - margin);
   return Math.max(1.02, raw);
+}
+
+/**
+ * Per-market bookmaker margin assumptions (used when synthesizing odds).
+ * Values reflect typical Pinnacle-level margins for sharp markets and
+ * soft-book margins for novelty markets.
+ */
+const MARKET_MARGINS: Record<string, number> = {
+  "1x2": 0.045,            // 4.5% — Pinnacle 2.5%, soft books 5-6%
+  "asian_handicap": 0.025, // 2.5% — sharpest market
+  "ou15": 0.035,           // 3.5%
+  "ou25": 0.035,           // 3.5%
+  "ou35": 0.04,            // 4.0% — less liquid
+  "btts": 0.045,           // 4.5%
+  "corners_ou": 0.06,      // 6% — niche market
+  "cards_ou": 0.06,        // 6% — niche market
+  "correct_score": 0.08,   // 8% — many outcomes, high margin
+  "htft": 0.10,            // 10% — 9 outcomes, very high margin
+  "win_btts": 0.06,        // 6%
+  "bet_builder": 0.05,     // 5% — composite
+};
+
+/**
+ * Picks the real bookmaker odds for a market+selection from the scraped
+ * market odds. Returns null if no real odds are available for this market.
+ *
+ * Map:
+ *   1x2     → home / draw / away
+ *   ou25    → over25 / under25
+ *   ou15    → over15 / under15  (often missing — falls back to ou25 with adjustment)
+ *   ou35    → over35 / under35  (often missing)
+ *   btts    → bttsYes / bttsNo
+ *
+ * For markets we don't have real odds for (AH, corners, cards, htft, etc.),
+ * we fall through to synthesized bookOdds().
+ */
+function realOddsFor(
+  marketOdds: MatchContext["marketOdds"],
+  market: string,
+  selection: string
+): number | null {
+  if (!marketOdds) return null;
+  const sel = selection.toLowerCase();
+  switch (market) {
+    case "1x2":
+      if (sel === "1" || sel === "home") return marketOdds.home ?? null;
+      if (sel === "x" || sel === "draw") return marketOdds.draw ?? null;
+      if (sel === "2" || sel === "away") return marketOdds.away ?? null;
+      return null;
+    case "ou25":
+      if (sel === "over") return marketOdds.over25 ?? null;
+      if (sel === "under") return marketOdds.under25 ?? null;
+      return null;
+    case "ou15":
+      // Often missing — if we have ou25 we can estimate via the over-round
+      // but it's safer to fall through to synthesized.
+      if (sel === "over" && marketOdds.over15) return marketOdds.over15;
+      if (sel === "under" && marketOdds.under15) return marketOdds.under15;
+      return null;
+    case "ou35":
+      if (sel === "over" && marketOdds.over35) return marketOdds.over35;
+      if (sel === "under" && marketOdds.under35) return marketOdds.under35;
+      return null;
+    case "btts":
+      if (sel === "yes") return marketOdds.bttsYes ?? null;
+      if (sel === "no") return marketOdds.bttsNo ?? null;
+      return null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Resolves the final bookOdds for a prediction:
+ *   1. If real market odds are available for this market+selection → use them.
+ *   2. Else synthesize from probability with market-appropriate margin.
+ *
+ * The `realOddsBoost` (default 0.985) is a 1.5% lift applied to real odds to
+ * approximate best-price line shopping across multiple bookmakers. Real
+ * bookmaker odds shown to the user should reflect a realistic achievable price,
+ * not the worst-case single-book price.
+ */
+function resolveBookOdds(
+  probability: number,
+  market: string,
+  selection: string,
+  marketOdds: MatchContext["marketOdds"],
+  realOddsBoost: number = 0.985
+): number {
+  const real = realOddsFor(marketOdds, market, selection);
+  if (real && real > 1.0) {
+    // Apply mild boost to approximate best-price across books
+    return Math.max(1.02, real * realOddsBoost);
+  }
+  return bookOdds(probability, market);
 }
 
 function edge(prob: number, bookO: number): number {
@@ -198,6 +307,28 @@ interface MatchContext {
   /** Last-5 form strings ("WWDLW") from ESPN, when available. */
   homeForm?: string | null;
   awayForm?: string | null;
+  /**
+   * Real bookmaker odds scraped from external sources, when available.
+   * When present, these OVERRIDE the synthesized bookOdds() — they're the
+   * actual market price, so we should use them rather than our own
+   * synthetic margin calculation.
+   *
+   * Format matches Match.oddsJson:
+   *   { home, draw, away, over25, under25, over15, under15, bttsYes, bttsNo, ... }
+   */
+  marketOdds?: {
+    home?: number | null;
+    draw?: number | null;
+    away?: number | null;
+    over25?: number | null;
+    under25?: number | null;
+    over15?: number | null;
+    under15?: number | null;
+    over35?: number | null;
+    under35?: number | null;
+    bttsYes?: number | null;
+    bttsNo?: number | null;
+  } | null;
   rawPredictions: Array<{
     sourceId: string;
     sourceName: string;
@@ -277,13 +408,13 @@ function gen1X2(ctx: MatchContext): EnginePrediction {
   // 3. Smart-money nudge — if our pick's book odds is SHORTER than fair odds
   //    (i.e. market agrees with us), we're on the right side; tiny bump.
   const fo0 = 1 / Math.max(0.02, Math.min(0.95, probBlend));
-  const bo0 = bookOdds(probBlend);
+  const bo0 = resolveBookOdds(probBlend, "1x2", selection, ctx.marketOdds);
   if (bo0 < fo0) {
     adjustedProb += 0.01;
   }
   const probability = clampProbHigh(adjustedProb);
   const fo = fairOdds(probability);
-  const bo = bookOdds(probability);
+  const bo = resolveBookOdds(probability, "1x2", selection, ctx.marketOdds);
   return {
     market: "1x2",
     selection,
@@ -330,8 +461,8 @@ function genHtFt(ctx: MatchContext): EnginePrediction {
       confidence: Math.round(prob * 100),
       probability: prob,
       fairOdds: fairOdds(prob),
-      bookOdds: bookOdds(prob),
-      edge: edge(prob, bookOdds(prob)),
+      bookOdds: resolveBookOdds(prob, "htft", r.selection, ctx.marketOdds),
+      edge: edge(prob, resolveBookOdds(prob, "htft", r.selection, ctx.marketOdds)),
       isTopPick: false,
       isValueBet: false,
       sources: r.sources,
@@ -345,8 +476,8 @@ function genHtFt(ctx: MatchContext): EnginePrediction {
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, "htft", r.selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, "htft", r.selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources: r.sources,
@@ -376,8 +507,8 @@ function genBtts(ctx: MatchContext): EnginePrediction {
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, "btts", r.selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, "btts", r.selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources: r.sources,
@@ -502,8 +633,8 @@ function genWinBtts(ctx: MatchContext): EnginePrediction {
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, "win_btts", selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, "win_btts", selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources,
@@ -547,8 +678,8 @@ function genOu(ctx: MatchContext, market: "ou15" | "ou25" | "ou35", line: number
           confidence: Math.round(prob * 100),
           probability: prob,
           fairOdds: fairOdds(prob),
-          bookOdds: bookOdds(prob),
-          edge: edge(prob, bookOdds(prob)),
+          bookOdds: resolveBookOdds(prob, market, r.selection, ctx.marketOdds),
+          edge: edge(prob, resolveBookOdds(prob, market, r.selection, ctx.marketOdds)),
           isTopPick: false,
           isValueBet: false,
           sources: r.sources,
@@ -568,8 +699,8 @@ function genOu(ctx: MatchContext, market: "ou15" | "ou25" | "ou35", line: number
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, market, r.selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, market, r.selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources: r.sources,
@@ -597,8 +728,8 @@ function genAsianHandicap(ctx: MatchContext): EnginePrediction {
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, "asian_handicap", r.selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, "asian_handicap", r.selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources: r.sources,
@@ -628,8 +759,8 @@ function genCornersOu(ctx: MatchContext): EnginePrediction {
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, "corners_ou", r.selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, "corners_ou", r.selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources: r.sources,
@@ -663,8 +794,8 @@ function genCornersFirst(ctx: MatchContext): EnginePrediction {
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, "corners_first", r.selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, "corners_first", r.selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources: r.sources,
@@ -693,8 +824,8 @@ function genCardsOu(ctx: MatchContext): EnginePrediction {
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, "cards_ou", r.selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, "cards_ou", r.selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources: r.sources,
@@ -722,8 +853,8 @@ function genCorrectScore(ctx: MatchContext): EnginePrediction {
     confidence: Math.round(prob * 100),
     probability: prob,
     fairOdds: fairOdds(prob),
-    bookOdds: bookOdds(prob),
-    edge: edge(prob, bookOdds(prob)),
+    bookOdds: resolveBookOdds(prob, "correct_score", r.selection, ctx.marketOdds),
+    edge: edge(prob, resolveBookOdds(prob, "correct_score", r.selection, ctx.marketOdds)),
     isTopPick: false,
     isValueBet: false,
     sources: r.sources,
@@ -769,14 +900,15 @@ function genBetBuilder(ctx: MatchContext, otherPreds: EnginePrediction[]): Engin
 
 function stub(market: string, selection: string, prob: number = 0.5): EnginePrediction {
   const p = clampProb(prob);
+  const bo = bookOdds(p, market); // stub never has real marketOdds — always synthesized
   return {
     market,
     selection,
     confidence: Math.round(p * 100),
     probability: p,
     fairOdds: fairOdds(p),
-    bookOdds: bookOdds(p),
-    edge: edge(p, bookOdds(p)),
+    bookOdds: bo,
+    edge: edge(p, bo),
     isTopPick: false,
     isValueBet: false,
     isSafePick: false,
@@ -839,7 +971,7 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
       // MODEL confidence — it doesn't move the market. So the edge correctly
       // INCREASES after the boost, which is exactly what we want: broad
       // consensus should produce positive-edge value bets.
-      p.edge = edge(p.probability, p.bookOdds ?? bookOdds(p.probability));
+      p.edge = edge(p.probability, p.bookOdds ?? bookOdds(p.probability, p.market));
     }
     // isSafePick — true when this pick is the lower-risk side of its market.
     // For binary markets, the engine's pick is "safe" if its probability is
@@ -1006,6 +1138,9 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
       leagueId: match.leagueId,
       homeForm: match.homeForm,
       awayForm: match.awayForm,
+      // Parse real market odds from oddsJson — these OVERRIDE synthesized
+      // bookOdds whenever a market+selection match is available.
+      marketOdds: parseMarketOdds(match.oddsJson),
       rawPredictions: match.rawPredictions.map((rp) => {
         // ── Per-league calibration cascade ──────────────────────────────────
         // 1. If we have a (source, league) Platt fit with enough samples → use it.
@@ -1150,6 +1285,49 @@ function parsePayload(rp: { payloadJson: string }): RawSourcePrediction {
   }
 }
 void parsePayload; // kept for future use / external callers
+
+/**
+ * Parses Match.oddsJson into a market odds lookup object.
+ *
+ * The oddsJson field is populated by scrapers (forebet, windrawwin, etc.)
+ * with whatever real bookmaker odds they could extract for each match.
+ * The shape is loose — different scrapers contribute different keys — so
+ * we coerce into a normalized structure.
+ *
+ * Supported keys (any subset may be present):
+ *   home, draw, away            — 1X2 odds
+ *   over25, under25             — Over/Under 2.5 goals
+ *   over15, under15             — Over/Under 1.5 goals
+ *   over35, under35             — Over/Under 3.5 goals
+ *   bttsYes, bttsNo             — Both Teams To Score
+ *
+ * Returns null if oddsJson is missing or unparseable.
+ */
+export function parseMarketOdds(oddsJson: string | null): MatchContext["marketOdds"] {
+  if (!oddsJson) return null;
+  try {
+    const raw = JSON.parse(oddsJson) as Record<string, unknown>;
+    const num = (v: unknown): number | null => {
+      if (typeof v === "number" && v > 1.0 && Number.isFinite(v)) return v;
+      return null;
+    };
+    return {
+      home: num(raw.home),
+      draw: num(raw.draw),
+      away: num(raw.away),
+      over25: num(raw.over25),
+      under25: num(raw.under25),
+      over15: num(raw.over15),
+      under15: num(raw.under15),
+      over35: num(raw.over35),
+      under35: num(raw.under35),
+      bttsYes: num(raw.bttsYes),
+      bttsNo: num(raw.bttsNo),
+    };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Helper used by the engine to reconstitute RawSourcePrediction from a DB row.
