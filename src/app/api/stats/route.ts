@@ -16,7 +16,7 @@ export async function GET(req: NextRequest) {
     db.match.findMany({ where: { matchDate: date }, include: { league: true } }),
     db.prediction.findMany({
       where: { match: { matchDate: date } },
-      include: { match: true },
+      include: { match: { include: { league: true } } },
     }),
     db.parlay.findMany({ where: { matchDate: date } }),
     db.source.findMany(),
@@ -33,13 +33,59 @@ export async function GET(req: NextRequest) {
     .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0))
     .slice(0, 5);
 
-  // Safe picks — the lower-risk side of each market per match. Surface the
-  // top 5 by probability so users can see the highest-confidence "safe"
-  // recommendations even when no value bets exist (e.g. only 1 source).
-  const safePicks = predictions
-    .filter((p) => p.isSafePick && !p.isTopPick)
-    .sort((a, b) => b.probability - a.probability)
-    .slice(0, 5);
+  // Safe picks — ONE safest pick per match, so every predicted match is
+  // represented in the Safe Picks tab. The top pick of a match is OFTEN the
+  // safest pick (highest probability), so we DO NOT exclude top picks —
+  // excluding them was the bug that made the tab appear empty even when
+  // matches were predicted. Skip composite markets (bet_builder / correct_score /
+  // htft / win_btts) since those aren't standalone safety picks.
+  //
+  // For each match:
+  //   1. Find all predictions flagged isSafePick=true.
+  //   2. If any exist, take the highest-probability one (TRUE SAFE — green badge).
+  //   3. If NONE exist for this match, fall back to the highest-probability
+  //      non-composite pick (BEST AVAILABLE — amber badge). This ensures the
+  //      tab NEVER appears empty when matches are predicted, even if all
+  //      probabilities fell just below the strict safe thresholds.
+  const COMPOSITE_MARKETS = new Set(["bet_builder", "correct_score", "htft", "win_btts"]);
+  const safeByMatch = new Map<string, (typeof predictions)[number]>();
+  const fallbackByMatch = new Map<string, (typeof predictions)[number]>();
+  for (const p of predictions) {
+    if (COMPOSITE_MARKETS.has(p.market)) continue;
+    if (p.isSafePick) {
+      const existing = safeByMatch.get(p.matchId);
+      if (!existing || p.probability > existing.probability) {
+        safeByMatch.set(p.matchId, p);
+      }
+    } else {
+      const existing = fallbackByMatch.get(p.matchId);
+      if (!existing || p.probability > existing.probability) {
+        fallbackByMatch.set(p.matchId, p);
+      }
+    }
+  }
+  // Merge: prefer true safe; fall back to best-available for matches without.
+  const allSafeByMatch = new Map<string, (typeof predictions)[number]>();
+  const allMatchIds = new Set<string>([...safeByMatch.keys(), ...fallbackByMatch.keys()]);
+  for (const matchId of allMatchIds) {
+    const trueSafe = safeByMatch.get(matchId);
+    const fallback = fallbackByMatch.get(matchId);
+    if (trueSafe) {
+      allSafeByMatch.set(matchId, trueSafe);
+    } else if (fallback) {
+      allSafeByMatch.set(matchId, fallback);
+    }
+  }
+
+  const safePicks = Array.from(allSafeByMatch.values())
+    .sort((a, b) => {
+      // True safe picks first, then by probability desc.
+      const aSafe = a.isSafePick ? 1 : 0;
+      const bSafe = b.isSafePick ? 1 : 0;
+      if (aSafe !== bSafe) return bSafe - aSafe;
+      return b.probability - a.probability;
+    })
+    .slice(0, 10);
 
   // Safe High-Odds picks — investment-grade picks with HIGHER ODDS (1.50–2.50)
   // that pass ALL safety precautions: multi-source consensus, strong edge,
@@ -68,7 +114,7 @@ export async function GET(req: NextRequest) {
       leaguesCovered: leagueCounts.size,
       topPicksCount: predictions.filter((p) => p.isTopPick).length,
       valueBetsCount: predictions.filter((p) => p.isValueBet).length,
-      safePicksCount: predictions.filter((p) => p.isSafePick).length,
+      safePicksCount: allSafeByMatch.size,
       safeHighOddsCount: predictions.filter((p) => p.isSafeHighOdds).length,
     },
     leagueCounts: Array.from(leagueCounts.entries()).map(([name, count]) => ({ name, count })),
@@ -105,12 +151,16 @@ export async function GET(req: NextRequest) {
     safePicks: safePicks.map((p) => ({
       id: p.id,
       match: `${p.match.homeTeam} v ${p.match.awayTeam}`,
+      league: p.match.league?.name ?? null,
+      kickoffBrussels: p.match.kickoffBrussels ?? null,
       market: p.market,
       selection: p.selection,
       confidence: p.confidence,
       probability: p.probability,
       bookOdds: p.bookOdds,
       edge: p.edge,
+      isSafePick: p.isSafePick,
+      isTopPick: p.isTopPick,
       consensusSources: p.consensusSources,
       recommendedStake: p.recommendedStake,
       clv: p.clv,

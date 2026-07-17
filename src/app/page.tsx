@@ -29,6 +29,7 @@ import {
   Loader2,
   Info,
   Shield,
+  Clock,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MatchCard, type MatchView } from "@/components/dashboard/match-card";
@@ -148,12 +149,16 @@ interface StatsResponse {
   safePicks?: Array<{
     id: string;
     match: string;
+    league?: string | null;
+    kickoffBrussels?: string | null;
     market: string;
     selection: string;
     confidence: number;
     probability?: number;
     bookOdds: number | null;
     edge: number | null;
+    isSafePick?: boolean;
+    isTopPick?: boolean;
     consensusSources?: number;
     recommendedStake?: number | null;
     clv?: number | null;
@@ -715,7 +720,7 @@ export default function Home() {
             )}
           </TabsContent>
 
-          {/* Safe picks tab — the lowest-risk pick from each market */}
+          {/* Safe picks tab — the safest pick from each predicted match */}
           <TabsContent value="safe" className="space-y-3 mt-4">
             {statsQuery.isLoading ? (
               <div className="space-y-2">
@@ -727,9 +732,9 @@ export default function Home() {
               <Card>
                 <CardContent className="py-12 text-center">
                   <Shield className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
-                  <p className="text-sm font-medium">No safe picks available for {date}</p>
+                  <p className="text-sm font-medium">No matches predicted for {date}</p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Safe picks are the lower-risk side of each market (probability ≥ 55% for binary markets, ≥ 50% for 1X2).
+                    Run the pipeline to generate predictions, or pick a different date.
                   </p>
                 </CardContent>
               </Card>
@@ -738,38 +743,73 @@ export default function Home() {
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold flex items-center gap-2">
                     <Shield className="h-4 w-4 text-emerald-500" />
-                    Top Safe Picks
+                    Safe Pick Per Match
                   </h3>
                   <Badge variant="secondary" className="text-xs">
-                    {statsQuery.data.stats.safePicksCount} total
+                    {statsQuery.data.stats.safePicksCount} {statsQuery.data.stats.safePicksCount === 1 ? "match" : "matches"}
                   </Badge>
                 </div>
-                <div className="space-y-1.5">
-                  {statsQuery.data.safePicks.map((v) => (
-                    <PredictionRow
-                      key={v.id}
-                      p={{
-                        id: v.id,
-                        market: v.market,
-                        selection: v.selection,
-                        confidence: v.confidence,
-                        probability: v.probability ?? 0,
-                        fairOdds: v.bookOdds ?? 0,
-                        bookOdds: v.bookOdds,
-                        edge: v.edge,
-                        isTopPick: false,
-                        isValueBet: false,
-                        isSafePick: true,
-                        consensusSources: v.consensusSources,
-                        sourcesJson: null,
-                        recommendedStake: v.recommendedStake,
-                        clv: v.clv,
-                      }}
-                    />
-                  ))}
+                <div className="space-y-2">
+                  {statsQuery.data.safePicks.map((v) => {
+                    const isTrueSafe = v.isSafePick === true;
+                    return (
+                      <div key={v.id} className="rounded-md border border-border/60 bg-card/50 px-3 py-2">
+                        <div className="flex items-center justify-between gap-2 mb-1.5 text-[11px] text-muted-foreground">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Clock className="h-3 w-3 shrink-0" />
+                            <span className="font-mono font-medium">{v.kickoffBrussels ?? "—"}</span>
+                            <span>·</span>
+                            <span className="truncate">{v.league ?? "—"}</span>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {v.isTopPick && (
+                              <Badge variant="outline" className="text-[9px] h-4 px-1 border-violet-400 text-violet-600 dark:text-violet-300 font-semibold">
+                                TOP
+                              </Badge>
+                            )}
+                            <Badge
+                              variant="outline"
+                              className={
+                                "text-[9px] h-4 px-1 font-semibold " +
+                                (isTrueSafe
+                                  ? "border-emerald-400 text-emerald-600 dark:text-emerald-300"
+                                  : "border-amber-400 text-amber-600 dark:text-amber-300")
+                              }
+                            >
+                              {isTrueSafe ? "SAFE" : "BEST"}
+                            </Badge>
+                          </div>
+                        </div>
+                        <div className="font-semibold text-xs mb-1.5 truncate">{v.match}</div>
+                        <PredictionRow
+                          p={{
+                            id: v.id,
+                            market: v.market,
+                            selection: v.selection,
+                            confidence: v.confidence,
+                            probability: v.probability ?? 0,
+                            fairOdds: v.bookOdds ?? 0,
+                            bookOdds: v.bookOdds,
+                            edge: v.edge,
+                            isTopPick: v.isTopPick === true,
+                            isValueBet: false,
+                            isSafePick: isTrueSafe,
+                            consensusSources: v.consensusSources,
+                            sourcesJson: null,
+                            recommendedStake: v.recommendedStake,
+                            clv: v.clv,
+                          }}
+                          compact
+                        />
+                      </div>
+                    );
+                  })}
                   <p className="text-xs text-muted-foreground italic text-center pt-2">
-                    Showing top {statsQuery.data.safePicks.length} safe picks by probability for {date}.
-                    Safe = lower-risk side of each market. Use these for low-variance bankroll growth.
+                    Showing the safest pick from each of the top {statsQuery.data.safePicks.length} predicted matches for {date}.
+                    {" "}
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium">SAFE</span> = clears the safe-pick threshold;
+                    {" "}
+                    <span className="text-amber-600 dark:text-amber-400 font-medium">BEST</span> = best available (no pick cleared the strict threshold, so the highest-probability option is shown).
                   </p>
                 </div>
               </>
