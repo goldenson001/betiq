@@ -1,16 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
-  "buildCommand": "next build",
-  "devCommand": "next dev",
-  "installCommand": "bun install",
+  "buildCommand": "prisma generate && next build",
   "outputDirectory": ".next",
-  "regions": ["bru1"],
-  "functions": {
-    "/api/trigger": { "maxDuration": 300 },
-    "/api/scrape": { "maxDuration": 300 },
-    "/api/feedback": { "maxDuration": 120 }
-  },
+  "regions": ["iad1"],
   "crons": [
     {
       "path": "/api/trigger?phase=all",
