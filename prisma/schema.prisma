@@ -1,0 +1,241 @@
+// Football Predictions Platform — Prisma Schema
+// SQLite for local dev (production: PostgreSQL via env DATABASE_URL)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Sources — each prediction scraper site is a Source with a tracked accuracy.
+// ──────────────────────────────────────────────────────────────────────────────
+model Source {
+  id            String   @id @default(cuid())
+  name          String   @unique // "predictz", "windrowwin", "statarea"
+  displayName   String
+  url           String
+  // Weight in [0,1] — higher = more trusted. Updated by self-learning loop.
+  weight        Float    @default(0.5)
+  // Running accuracy metrics per market
+  totalPredictions  Int    @default(0)
+  correctPredictions Int   @default(0)
+  accuracy      Float    @default(0)
+  // ROI on following this source's flat bets (units)
+  roi           Float    @default(0)
+  // Bookmaker-style implied odds accuracy
+  calibration   Float    @default(0.5)
+  lastScrapedAt DateTime?
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  predictions RawPrediction[]
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Leagues & Teams — normalized across sources
+// ──────────────────────────────────────────────────────────────────────────────
+model League {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  country   String
+  code      String?  // ISO country code or competition code
+  createdAt DateTime @default(now())
+  matches   Match[]
+}
+
+model Team {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  aliases   String   // JSON array of alternate names
+  createdAt DateTime @default(now())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Matches — every match on a given date
+// ──────────────────────────────────────────────────────────────────────────────
+model Match {
+  id          String    @id @default(cuid())
+  // Composite natural key for deduplication
+  externalId  String    @unique // e.g. "2026-07-17:arsenal:chelsea"
+  // Brussels-timezone date (ISO date string)
+  matchDate   String    // "2026-07-17"
+  // ISO datetime in UTC — actual kickoff
+  kickoffUtc  DateTime
+  // Brussels-local kickoff display
+  kickoffBrussels String // "20:45"
+  leagueId    String?
+  league      League?   @relation(fields: [leagueId], references: [id])
+  homeTeam    String
+  awayTeam    String
+  homeTeamId  String?
+  awayTeamId  String?
+  // Status: scheduled | live | finished | postponed | cancelled
+  status      String    @default("scheduled")
+  // Final score (filled after match)
+  homeScore   Int?
+  awayScore   Int?
+  // Half-time score
+  htHomeScore Int?
+  htAwayScore Int?
+  // Stats
+  corners     Int?
+  cards       Int?
+  // Bookmaker odds snapshot (JSON)
+  oddsJson    String?
+  // Result processing flag
+  resultProcessed Boolean @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  rawPredictions RawPrediction[]
+  predictions    Prediction[]
+  @@index([matchDate])
+  @@index([kickoffUtc])
+  @@index([status])
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// RawPrediction — what each source said about a match, before normalization
+// ──────────────────────────────────────────────────────────────────────────────
+model RawPrediction {
+  id          String   @id @default(cuid())
+  matchId     String
+  match       Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  sourceId    String
+  source      Source   @relation(fields: [sourceId], references: [id])
+  // JSON blob with everything the source said — flexible per source
+  payloadJson String
+  // Normalized fields (best-effort parse)
+  predicted1X2    String? // "1" | "X" | "2"
+  predictedScore  String? // "2-1"
+  predictedBTTS   String? // "yes" | "no"
+  predictedOU25   String? // "over" | "under"
+  // Was this raw prediction later marked correct/incorrect?
+  evaluated   Boolean  @default(false)
+  correct     Boolean?
+  createdAt   DateTime @default(now())
+
+  @@index([matchId, sourceId])
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Prediction — the engine's compound prediction for a single match & market
+// ──────────────────────────────────────────────────────────────────────────────
+model Prediction {
+  id          String   @id @default(cuid())
+  matchId     String
+  match       Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  // Market type: 1x2 | htft | btts | ou15 | ou25 | ou35 | asian_handicap | corners_ou | corners_first | cards_ou | correct_score | bet_builder
+  market      String
+  // The selection (e.g. "1", "1/X", "yes", "over", "2-1", "Arsenal -1.5", "over 9.5 corners")
+  selection   String
+  // Confidence percentage [0,100]
+  confidence  Float
+  // Implied probability [0,1]
+  probability Float
+  // Estimated fair odds (1/probability, with margin removed)
+  fairOdds    Float
+  // Best bookmaker odds observed (for value calc)
+  bookOdds    Float?
+  // Value edge = (bookOdds * probability) - 1
+  edge        Float?
+  // Is this the highest-confidence selection for this match?
+  isTopPick   Boolean  @default(false)
+  // Is this a value bet recommendation?
+  isValueBet  Boolean  @default(false)
+  // Per-source breakdown JSON — which sources said what
+  sourcesJson String?
+  // Evaluation
+  evaluated   Boolean  @default(false)
+  correct     Boolean?
+  createdAt   DateTime @default(now())
+
+  @@index([matchId, market])
+  @@index([confidence])
+  @@index([isValueBet])
+  @@index([isTopPick])
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Parlay — accumulator recommendation
+// ──────────────────────────────────────────────────────────────────────────────
+model Parlay {
+  id          String   @id @default(cuid())
+  matchDate   String
+  // "daily_best" | "value" | "safe"
+  type        String
+  // JSON: [{predictionId, matchId, market, selection, odds, confidence}, ...]
+  legsJson    String
+  legsCount   Int
+  // Combined probability (product of leg probabilities)
+  combinedProbability Float
+  // Combined decimal odds (product of leg odds)
+  combinedOdds Float
+  // Confidence score [0,100]
+  confidence  Float
+  // Expected value
+  expectedValue Float
+  // Evaluation
+  evaluated   Boolean  @default(false)
+  won         Boolean?
+  createdAt   DateTime @default(now())
+
+  @@index([matchDate, type])
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PerformanceSnapshot — daily aggregate metrics for the dashboard
+// ──────────────────────────────────────────────────────────────────────────────
+model PerformanceSnapshot {
+  id          String   @id @default(cuid())
+  date        String   @unique // "2026-07-17"
+  // Prediction-level metrics
+  totalPredictions Int
+  correctPredictions Int
+  winRate     Float
+  // ROI on flat 1-unit bets on top picks
+  roi         Float
+  // Parlay metrics
+  parlaysMade Int
+  parlaysWon  Int
+  parlayRoi   Float
+  // Streak data
+  winStreak   Int
+  loseStreak  Int
+  // JSON: per-market breakdown
+  marketBreakdownJson String?
+  createdAt   DateTime @default(now())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ModelState — parameters the self-learning loop tunes
+// ──────────────────────────────────────────────────────────────────────────────
+model ModelState {
+  id          String   @id @default(cuid())
+  // Key: "source_weight:predictz" | "market_calibration:1x2" | "global_temp" etc.
+  key         String   @unique
+  value       Float
+  // Metadata for traceability
+  notes       String?
+  updatedAt   DateTime @updatedAt
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ScrapeLog — audit trail of scraper runs
+// ──────────────────────────────────────────────────────────────────────────────
+model ScrapeLog {
+  id          String   @id @default(cuid())
+  source      String
+  startedAt   DateTime
+  finishedAt  DateTime?
+  matchesFound Int     @default(0)
+  predictionsExtracted Int @default(0)
+  status      String   @default("running") // running | success | failed
+  error       String?
+  createdAt   DateTime @default(now())
+}

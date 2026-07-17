@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# BetIQ — Docker Compose stack
+#   - app:     Next.js standalone server (port 3000)
+#   - db:      PostgreSQL 16 (production-grade; SQLite still works for local dev)
+#   - caddy:   HTTPS reverse proxy (auto Let's Encrypt)
+#
+# Quick start:
+#   cp .env.example .env
+#   docker compose up -d
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: betiq
+      POSTGRES_PASSWORD: betiq_secret_change_me
+      POSTGRES_DB: betiq
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U betiq -d betiq"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not exposed externally — app talks to it over the internal network.
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Override DATABASE_URL to point at Postgres instead of local SQLite
+      DATABASE_URL: postgresql://betiq:betiq_secret_change_me@db:5432/betiq?schema=public
+      TZ: Europe/Brussels
+      NODE_ENV: production
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist SQLite db if you fall back to it; harmless on Postgres
+      - app_data:/app/db
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    # Edit Caddyfile to set your real domain (replace :81 with your-domain.com).
+
+volumes:
+  postgres_data:
+  app_data:
+  caddy_data:
+  caddy_config:

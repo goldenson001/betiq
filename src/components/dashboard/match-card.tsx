@@ -1,0 +1,143 @@
+"use client";
+
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { ChevronRight, Clock, ChevronDown } from "lucide-react";
+import { PredictionRow, type PredictionView } from "./prediction-row";
+import { cn } from "@/lib/utils";
+
+export interface MatchView {
+  id: string;
+  externalId: string;
+  matchDate: string;
+  kickoffBrussels: string;
+  homeTeam: string;
+  awayTeam: string;
+  status: string;
+  homeScore: number | null;
+  awayScore: number | null;
+  league: { id: string; name: string; country: string } | null;
+  predictions: PredictionView[];
+}
+
+interface MatchCardProps {
+  match: MatchView;
+  onOpen: (match: MatchView) => void;
+}
+
+const MARKET_ORDER = [
+  "1x2",
+  "htft",
+  "btts",
+  "ou15",
+  "ou25",
+  "ou35",
+  "asian_handicap",
+  "corners_ou",
+  "corners_first",
+  "cards_ou",
+  "correct_score",
+  "bet_builder",
+];
+
+export function MatchCard({ match, onOpen }: MatchCardProps) {
+  const top = match.predictions.find((p) => p.isTopPick);
+  const sorted = [...match.predictions].sort(
+    (a, b) => MARKET_ORDER.indexOf(a.market) - MARKET_ORDER.indexOf(b.market) || b.confidence - a.confidence
+  );
+  const hasResult = match.status === "finished" && match.homeScore !== null && match.awayScore !== null;
+  const avgConfidence =
+    match.predictions.length > 0
+      ? Math.round(match.predictions.reduce((s, p) => s + p.confidence, 0) / match.predictions.length)
+      : 0;
+  const valueBetsCount = match.predictions.filter((p) => p.isValueBet).length;
+
+  return (
+    <Card
+      className="overflow-hidden cursor-pointer hover:border-primary/40 hover:shadow-md transition-all"
+      onClick={() => onOpen(match)}
+    >
+      <CardHeader className="pb-2 pt-3 px-4 bg-muted/30">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <span className="text-xs font-mono font-medium text-muted-foreground">
+              {match.kickoffBrussels}
+            </span>
+            <span className="text-xs text-muted-foreground truncate">·</span>
+            <span className="text-xs text-muted-foreground truncate">{match.league?.name ?? "—"}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {valueBetsCount > 0 && (
+              <Badge variant="outline" className="text-[10px] border-amber-400 text-amber-600 dark:text-amber-400 font-semibold">
+                {valueBetsCount} VALUE
+              </Badge>
+            )}
+            {hasResult && (
+              <Badge variant="secondary" className="text-[10px] font-semibold">
+                FT {match.homeScore}-{match.awayScore}
+              </Badge>
+            )}
+            <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="px-4 py-3">
+        {/* Teams row */}
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-sm font-bold truncate flex-1 text-right pr-2">{match.homeTeam}</div>
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground px-1.5 py-0.5 bg-muted rounded font-semibold shrink-0">
+            v
+          </div>
+          <div className="text-sm font-bold truncate flex-1 pl-2">{match.awayTeam}</div>
+        </div>
+
+        {/* Average confidence bar */}
+        <div className="flex items-center gap-2 mb-3 text-[10px]">
+          <span className="text-muted-foreground uppercase tracking-wider">Avg Conf.</span>
+          <div className="flex-1 h-1 bg-muted rounded-full overflow-hidden">
+            <div
+              className={cn(
+                "h-full transition-all",
+                avgConfidence >= 75 ? "bg-emerald-500" : avgConfidence >= 60 ? "bg-lime-500" : avgConfidence >= 45 ? "bg-amber-500" : "bg-rose-500"
+              )}
+              style={{ width: `${avgConfidence}%` }}
+            />
+          </div>
+          <span className="font-bold tabular-nums">{avgConfidence}%</span>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-muted-foreground">{match.predictions.length} markets</span>
+        </div>
+
+        {/* Top pick — always shown prominently */}
+        {top && (
+          <div className="mb-2">
+            <PredictionRow p={top} />
+          </div>
+        )}
+
+        {/* ALL other market predictions — show every market, no truncation */}
+        <div className="space-y-1">
+          {sorted
+            .filter((p) => !p.isTopPick)
+            .map((p) => (
+              <PredictionRow key={p.id} p={p} compact />
+            ))}
+        </div>
+
+        {/* Footer hint */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen(match);
+          }}
+          className="mt-2 w-full text-[11px] text-primary hover:text-primary/80 font-medium flex items-center justify-center gap-1 py-1 border-t border-border/50 pt-2"
+        >
+          <ChevronDown className="h-3 w-3" />
+          View source breakdown & expert consensus
+        </button>
+      </CardContent>
+    </Card>
+  );
+}
