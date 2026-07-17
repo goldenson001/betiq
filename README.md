@@ -128,13 +128,27 @@ The stack includes:
 
 The app boots, runs `prisma db push` to apply schema, then starts the Next.js server. The scheduler fires the pipeline immediately if today's data is missing.
 
-### Option B — Vercel / Netlify
+### Option B — Vercel (one-click import)
 
-```bash
-vercel deploy
-```
+1. Go to **[vercel.com/new](https://vercel.com/new)** and import the GitHub repo: `https://github.com/goldenson001/betiq`
+2. Vercel auto-detects Next.js — no override needed.
+3. Set environment variables in the Vercel project settings (or during import):
+   - `DATABASE_URL` — a hosted PostgreSQL connection string. Recommended providers:
+     - **Neon** (free tier, serverless Postgres): `postgresql://user:pass@ep-xxx.region.aws.neon.tech/betiq?sslmode=require`
+     - **Supabase** (free tier): `postgresql://postgres:pass@db.xxxxx.supabase.co:5432/postgres`
+     - **Railway**, **Render**, **Aiven** also work.
+   - `TZ` — `Europe/Brussels` (recommended — keeps date bucketing consistent with the dashboard's Brussels-timezone labels)
+   - `DISABLE_SCHEDULER` — `true` (the in-process `setInterval` scheduler does not work on Vercel serverless; we use Vercel Cron instead — see `vercel.json`)
+4. Click **Deploy**. First build runs `prisma generate && next build` (~2 min).
+5. After deploy: trigger the first pipeline run by visiting
+   `https://<your-app>.vercel.app/api/trigger?phase=all` in your browser.
 
-Set `DATABASE_URL` to a hosted PostgreSQL (Neon, Supabase, Railway). Note: the long-running scheduler (`setInterval`) only works on a long-lived server — on Vercel you'll need an external cron (e.g. Vercel Cron, cron-job.org) hitting `/api/trigger?phase=all` daily at 00:00 Brussels.
+**Cron**: `vercel.json` already declares a daily cron hitting `/api/trigger?phase=all` at 22:00 UTC (= 00:00 Brussels during CEST). On Vercel's free tier, this requires Vercel Pro for daily cron jobs. Alternatively, use **cron-job.org** (free) to hit the same URL on any schedule.
+
+**Notes for Vercel**:
+- The `/api/trigger?phase=all` route has `maxDuration: 300` (5 min) — Vercel Hobby caps at 60s, so upgrade to Pro or trigger phases individually (`?phase=scrape`, then `?phase=predict`, then `?phase=parlays`).
+- SQLite is **not** supported on Vercel — you must use PostgreSQL.
+- Prisma client is generated automatically during build via the `build` script.
 
 ### Option C — Bare metal / VPS
 
