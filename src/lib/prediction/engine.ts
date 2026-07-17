@@ -695,10 +695,15 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
   // Bet builder uses the others
   preds.push(genBetBuilder(ctx, preds));
 
-  // Determine top pick — highest confidence non-bet-builder prediction
-  const nonBb = preds.filter((p) => p.market !== "bet_builder");
-  if (nonBb.length > 0) {
-    const top = nonBb.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+  // Determine top pick — highest confidence prediction, EXCLUDING combo /
+  // synthetic markets. bet_builder is a multi-leg composite, and win_btts is
+  // a combo market that overlaps with 1X2 + BTTS (so promoting it as the
+  // "top pick" would double-count signal). Both still appear in the
+  // predictions list — they're just never flagged as the headline pick.
+  const EXCLUDED_TOP_PICK_MARKETS = new Set(["bet_builder", "win_btts"]);
+  const eligible = preds.filter((p) => !EXCLUDED_TOP_PICK_MARKETS.has(p.market));
+  if (eligible.length > 0) {
+    const top = eligible.reduce((a, b) => (b.confidence > a.confidence ? b : a));
     top.isTopPick = true;
   }
 
