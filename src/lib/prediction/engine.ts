@@ -274,6 +274,132 @@ function genBtts(ctx: MatchContext): EnginePrediction {
   };
 }
 
+/**
+ * WIN + BTTS combo market.
+ *
+ * This is a 3-way market offered by many bookmakers:
+ *   - "Home Win + BTTS Yes" — home team wins AND both teams score
+ *   - "Away Win + BTTS Yes" — away team wins AND both teams score
+ *   - "No" — neither of the above (draw, or win-without-BTTS, or 0-0 etc.)
+ *
+ * Probability calc:
+ *   P(HomeWin+BTTS) ≈ P(HomeWin) × P(BTTS | HomeWin)
+ *                    ≈ P(HomeWin) × P(BTTS) × adjustment_factor
+ *
+ *   The adjustment factor accounts for correlation: when the home team wins,
+ *   they're more likely to keep a clean sheet (so BTTS is slightly less likely).
+ *   Empirical data suggests BTTS is ~10% less likely in home wins vs the
+ *   unconditional BTTS rate. We apply 0.90 as the conditional factor.
+ *
+ *   Same logic mirrored for the away team.
+ *
+ * Selection logic:
+ *   - If P(HomeWin+BTTS) > P(AwayWin+BTTS), pick "home_win_btts"
+ *   - Else pick "away_win_btts"
+ *   - But if neither exceeds 12% (base rate ~ 18% for a typical home win + BTTS),
+ *     we pick "no" since the combo is too unlikely to recommend.
+ */
+function genWinBtts(ctx: MatchContext): EnginePrediction {
+  // Reuse 1X2 and BTTS picks
+  const picks1x2: SourcePick[] = ctx.rawPredictions
+    .filter((r) => r.prediction["1x2"])
+    .map((r) => ({
+      sourceId: r.sourceId,
+      sourceName: r.sourceName,
+      weight: r.weight,
+      pick: r.prediction["1x2"] as string,
+      probabilities: r.prediction.probabilities,
+    }));
+  const picksBtts: SourcePick[] = ctx.rawPredictions
+    .filter((r) => r.prediction.btts)
+    .map((r) => ({
+      sourceId: r.sourceId,
+      sourceName: r.sourceName,
+      weight: r.weight,
+      pick: r.prediction.btts as string,
+    }));
+
+  // Compute weighted P(HomeWin), P(AwayWin), P(BTTS=Yes)
+  let pHome = 0, pAway = 0, pDraw = 0;
+  let pBttsYes = 0;
+  let totalW1x2 = 0, totalWBtts = 0;
+
+  // If sources expose explicit probabilities, use those
+  const probSources = ctx.rawPredictions.filter((r) => r.prediction.probabilities);
+  if (probSources.length > 0) {
+    for (const r of probSources) {
+      const pr = r.prediction.probabilities!;
+      const w = r.weight;
+      pHome += (pr.home ?? 0.33) * w;
+      pDraw += (pr.draw ?? 0.33) * w;
+      pAway += (pr.away ?? 0.33) * w;
+      totalW1x2 += w;
+    }
+  } else if (picks1x2.length > 0) {
+    // Fall back to mode-based
+    for (const p of picks1x2) {
+      if (p.pick === "1") pHome += p.weight;
+      else if (p.pick === "2") pAway += p.weight;
+      else pDraw += p.weight;
+      totalW1x2 += p.weight;
+    }
+  }
+  if (totalW1x2 > 0) { pHome /= totalW1x2; pDraw /= totalW1x2; pAway /= totalW1x2; }
+  else { pHome = 0.4; pDraw = 0.3; pAway = 0.3; }
+
+  if (picksBtts.length > 0) {
+    for (const p of picksBtts) {
+      if (p.pick === "yes") pBttsYes += p.weight;
+      totalWBtts += p.weight;
+    }
+    if (totalWBtts > 0) pBttsYes /= totalWBtts;
+    else pBttsYes = 0.52;
+  } else {
+    pBttsYes = 0.52; // base rate
+  }
+
+  // Conditional factors — BTTS is slightly less likely in a win (clean sheet effect)
+  const HOME_COND = 0.90; // P(BTTS | HomeWin) = 0.90 × P(BTTS)
+  const AWAY_COND = 0.88; // slightly lower for away wins (away leaders more defensive)
+
+  const pHomeWinBtts = pHome * pBttsYes * HOME_COND;
+  const pAwayWinBtts = pAway * pBttsYes * AWAY_COND;
+  const pNo = 1 - pHomeWinBtts - pAwayWinBtts;
+
+  // Selection — pick the most likely combo, or "no" if neither clears 12%
+  let selection: string;
+  let prob: number;
+  if (pHomeWinBtts < 0.12 && pAwayWinBtts < 0.12) {
+    selection = "no";
+    prob = clampProb(pNo);
+  } else if (pHomeWinBtts >= pAwayWinBtts) {
+    selection = `${ctx.homeTeam} win + BTTS`;
+    prob = clampProb(pHomeWinBtts);
+  } else {
+    selection = `${ctx.awayTeam} win + BTTS`;
+    prob = clampProb(pAwayWinBtts);
+  }
+
+  // Sources: union of 1X2 and BTTS contributors, tagged by market
+  const sources = [
+    ...picks1x2.map((p) => ({ source: p.sourceName, pick: `1x2:${p.pick}`, weight: p.weight })),
+    ...picksBtts.map((p) => ({ source: p.sourceName, pick: `btts:${p.pick}`, weight: p.weight })),
+  ];
+
+  return {
+    market: "win_btts",
+    selection,
+    confidence: Math.round(prob * 100),
+    probability: prob,
+    fairOdds: fairOdds(prob),
+    bookOdds: bookOdds(prob),
+    edge: edge(prob, bookOdds(prob)),
+    isTopPick: false,
+    isValueBet: false,
+    sources,
+  };
+}
+
 function genOu(ctx: MatchContext, market: "ou15" | "ou25" | "ou35", line: number): EnginePrediction {
   const picks: SourcePick[] = ctx.rawPredictions
     .filter((r) => r.prediction[market])
@@ -499,9 +625,12 @@ function genCorrectScore(ctx: MatchContext): EnginePrediction {
  * into a single multi-leg accumulator for that match.
  */
 function genBetBuilder(ctx: MatchContext, otherPreds: EnginePrediction[]): EnginePrediction {
-  // Pick the top 3 highest-confidence markets with reasonable probability
+  // Pick the top 3 highest-confidence base markets with reasonable probability.
+  // Exclude combo markets (win_btts, bet_builder) and correct_score (too low-prob
+  // and conflicts with O/U) to keep legs from overlapping.
+  const comboMarkets = new Set(["win_btts", "bet_builder", "correct_score"]);
   const candidates = otherPreds
-    .filter((p) => p.probability >= 0.45 && p.probability <= 0.85)
+    .filter((p) => !comboMarkets.has(p.market) && p.probability >= 0.45 && p.probability <= 0.85)
     .sort((a, b) => b.probability - a.probability)
     .slice(0, 3);
   if (candidates.length < 2) {
@@ -554,6 +683,7 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
   preds.push(gen1X2(ctx));
   preds.push(genHtFt(ctx));
   preds.push(genBtts(ctx));
+  preds.push(genWinBtts(ctx));
   preds.push(genOu(ctx, "ou15", 1.5));
   preds.push(genOu(ctx, "ou25", 2.5));
   preds.push(genOu(ctx, "ou35", 3.5));

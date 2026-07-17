@@ -38,6 +38,7 @@ export function marketLabel(market: string): string {
     "1x2": "Match Result (1X2)",
     htft: "Half-time / Full-time",
     btts: "Both Teams to Score",
+    win_btts: "Win + BTTS",
     ou15: "Over 1.5 Goals",
     ou25: "Over 2.5 Goals",
     ou35: "Over 3.5 Goals",
@@ -59,6 +60,11 @@ export function selectionLabel(market: string, selection: string): string {
   }
   if (market === "btts") {
     return selection === "yes" ? "Yes — Both Score" : "No — Not Both";
+  }
+  if (market === "win_btts") {
+    if (selection === "no") return "No — Neither Combo Hits";
+    // Selections like "Arsenal win + BTTS" pass through
+    return selection;
   }
   return selection;
 }

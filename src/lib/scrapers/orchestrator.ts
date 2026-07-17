@@ -14,6 +14,13 @@ import { scrapeEspn, ESPN_LEAGUE_COUNT } from "./espn";
 import { scrapePredictz } from "./predictz";
 import { scrapeWindrawwin } from "./windrawwin";
 import { scrapeStatarea } from "./statarea";
+import { scrapeForebet } from "./forebet";
+import { scrapeBetExplorer } from "./betexplorer";
+import { scrapeSoccerVista } from "./soccervista";
+import { scrapeAdibet } from "./adibet";
+import { scrapeVitibet } from "./vitibet";
+import { scrapeSoccerstats } from "./soccerstats";
+import { scrapeFlashScore } from "./flashscore";
 
 interface SourceDef {
   name: string;
@@ -52,6 +59,55 @@ const SOURCES: SourceDef[] = [
     url: "https://www.statarea.com",
     providesFixtures: false,
     scrape: scrapeStatarea,
+  },
+  {
+    name: "forebet",
+    displayName: "Forebet",
+    url: "https://www.forebet.com",
+    providesFixtures: false,
+    scrape: scrapeForebet,
+  },
+  {
+    name: "betexplorer",
+    displayName: "BetExplorer",
+    url: "https://www.betexplorer.com",
+    providesFixtures: false,
+    scrape: scrapeBetExplorer,
+  },
+  {
+    name: "soccerista",
+    displayName: "SoccerVista",
+    url: "https://www.soccervista.com",
+    providesFixtures: false,
+    scrape: scrapeSoccerVista,
+  },
+  {
+    name: "adibet",
+    displayName: "Adibet",
+    url: "https://www.adibet.com",
+    providesFixtures: false,
+    scrape: scrapeAdibet,
+  },
+  {
+    name: "vitibet",
+    displayName: "Vitibet",
+    url: "https://www.vitibet.com",
+    providesFixtures: false,
+    scrape: scrapeVitibet,
+  },
+  {
+    name: "soccerstats",
+    displayName: "Soccerstats",
+    url: "https://www.soccerstats.com",
+    providesFixtures: false,
+    scrape: scrapeSoccerstats,
+  },
+  {
+    name: "flashscore",
+    displayName: "FlashScore",
+    url: "https://www.flashscore.com",
+    providesFixtures: false,
+    scrape: scrapeFlashScore,
   },
 ];
 
@@ -159,6 +215,13 @@ export async function runAllScrapers(targetDate?: string): Promise<{
       const m = item.match;
       const league = await ensureLeague(m.leagueName, m.country);
 
+      // Extract H2H + form from ESPN's raw payload (other sources don't have it)
+      const rawPayload = item.prediction.raw as Record<string, unknown> | undefined;
+      const h2h = rawPayload?.h2h as unknown;
+      const h2hJson = h2h ? JSON.stringify(h2h) : null;
+      const homeForm = (rawPayload?.homeForm as string | undefined) ?? null;
+      const awayForm = (rawPayload?.awayForm as string | undefined) ?? null;
+
       const match = await db.match.upsert({
         where: { externalId: m.externalId },
         create: {
@@ -172,12 +235,20 @@ export async function runAllScrapers(targetDate?: string): Promise<{
           status: "scheduled",
           // Persist bookmaker odds snapshot from ESPN (best-effort)
           oddsJson: item.prediction.odds ? JSON.stringify(item.prediction.odds) : null,
+          // Persist H2H + form from ESPN (only set when present, never overwrite with null)
+          h2hJson,
+          homeForm,
+          awayForm,
         },
         update: {
           kickoffUtc: m.kickoffUtc,
           kickoffBrussels: m.kickoffBrussels,
           leagueId: league.id,
           oddsJson: item.prediction.odds ? JSON.stringify(item.prediction.odds) : null,
+          // Update H2H + form when ESPN provides fresh data (don't null-out existing)
+          ...(h2hJson ? { h2hJson } : {}),
+          ...(homeForm ? { homeForm } : {}),
+          ...(awayForm ? { awayForm } : {}),
         },
       });
       matchIdByExternalId.set(m.externalId, match.id);

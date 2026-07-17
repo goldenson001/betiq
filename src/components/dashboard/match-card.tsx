@@ -16,6 +16,9 @@ export interface MatchView {
   status: string;
   homeScore: number | null;
   awayScore: number | null;
+  homeForm: string | null;
+  awayForm: string | null;
+  h2hJson: string | null;
   league: { id: string; name: string; country: string } | null;
   predictions: PredictionView[];
 }
@@ -29,6 +32,7 @@ const MARKET_ORDER = [
   "1x2",
   "htft",
   "btts",
+  "win_btts",
   "ou15",
   "ou25",
   "ou35",
@@ -83,14 +87,78 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
         </div>
       </CardHeader>
       <CardContent className="px-4 py-3">
-        {/* Teams row */}
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-sm font-bold truncate flex-1 text-right pr-2">{match.homeTeam}</div>
+        {/* Teams row with form badges */}
+        <div className="flex items-center justify-between mb-2 gap-2">
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-bold truncate text-right">{match.homeTeam}</div>
+            {match.homeForm && (
+              <div className="flex gap-0.5 mt-1 justify-end">
+                {match.homeForm.slice(0, 5).split("").map((c, i) => (
+                  <span
+                    key={i}
+                    className={
+                      "w-3.5 h-3.5 rounded text-[8px] font-bold flex items-center justify-center " +
+                      (c === "W"
+                        ? "bg-emerald-500 text-white"
+                        : c === "D"
+                          ? "bg-amber-500 text-white"
+                          : c === "L"
+                            ? "bg-rose-500 text-white"
+                            : "bg-muted text-muted-foreground")
+                    }
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="text-[10px] uppercase tracking-wider text-muted-foreground px-1.5 py-0.5 bg-muted rounded font-semibold shrink-0">
             v
           </div>
-          <div className="text-sm font-bold truncate flex-1 pl-2">{match.awayTeam}</div>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-bold truncate">{match.awayTeam}</div>
+            {match.awayForm && (
+              <div className="flex gap-0.5 mt-1">
+                {match.awayForm.slice(0, 5).split("").map((c, i) => (
+                  <span
+                    key={i}
+                    className={
+                      "w-3.5 h-3.5 rounded text-[8px] font-bold flex items-center justify-center " +
+                      (c === "W"
+                        ? "bg-emerald-500 text-white"
+                        : c === "D"
+                          ? "bg-amber-500 text-white"
+                          : c === "L"
+                            ? "bg-rose-500 text-white"
+                            : "bg-muted text-muted-foreground")
+                    }
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* H2H summary mini-row */}
+        {match.h2hJson && (() => {
+          try {
+            const h2h = JSON.parse(match.h2hJson);
+            if (!h2h || !h2h.totalGames) return null;
+            return (
+              <div className="flex items-center justify-center gap-2 text-[10px] text-muted-foreground mb-2">
+                <span className="uppercase tracking-wider">H2H:</span>
+                <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{h2h.homeWins}H</span>
+                <span className="text-amber-600 dark:text-amber-400 font-semibold">{h2h.draws}D</span>
+                <span className="text-blue-600 dark:text-blue-400 font-semibold">{h2h.awayWins}A</span>
+                <span className="text-muted-foreground">·</span>
+                <span>{h2h.totalGames} games</span>
+              </div>
+            );
+          } catch { return null; }
+        })()}
 
         {/* Average confidence bar */}
         <div className="flex items-center gap-2 mb-3 text-[10px]">

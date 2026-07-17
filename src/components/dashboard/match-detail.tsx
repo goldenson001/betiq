@@ -27,6 +27,9 @@ export interface MatchDetailView {
   htAwayScore: number | null;
   corners: number | null;
   cards: number | null;
+  homeForm: string | null;
+  awayForm: string | null;
+  h2hJson: string | null;
   league: { id: string; name: string; country: string } | null;
   predictions: PredictionView[];
   rawPredictions: Array<{
@@ -49,6 +52,7 @@ const MARKET_ORDER = [
   "1x2",
   "htft",
   "btts",
+  "win_btts",
   "ou15",
   "ou25",
   "ou35",
@@ -60,12 +64,69 @@ const MARKET_ORDER = [
   "bet_builder",
 ];
 
+interface H2HMatch {
+  date: string | null;
+  homeTeam: string;
+  awayTeam: string;
+  homeScore: number;
+  awayScore: number;
+  result: "home" | "away" | "draw";
+}
+
+interface H2HSummary {
+  totalGames: number;
+  homeWins: number;
+  awayWins: number;
+  draws: number;
+  lastMatches: H2HMatch[];
+}
+
+function parseH2H(json: string | null): H2HSummary | null {
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as H2HSummary;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Render form string like "WLDLL" as colored badges per match.
+ * Each letter gets a colored chip: W=green, D=amber, L=red.
+ */
+function FormBadges({ form }: { form: string | null }) {
+  if (!form) return <span className="text-xs text-muted-foreground italic">N/A</span>;
+  const recent = form.slice(0, 5);
+  return (
+    <div className="flex gap-1">
+      {recent.split("").map((c, i) => (
+        <span
+          key={i}
+          className={
+            "w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center " +
+            (c === "W"
+              ? "bg-emerald-500 text-white"
+              : c === "D"
+                ? "bg-amber-500 text-white"
+                : c === "L"
+                  ? "bg-rose-500 text-white"
+                  : "bg-muted text-muted-foreground")
+          }
+        >
+          {c}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export function MatchDetailDialog({ match, open, onOpenChange }: Props) {
   if (!match) return null;
   const sorted = [...match.predictions].sort(
     (a, b) => MARKET_ORDER.indexOf(a.market) - MARKET_ORDER.indexOf(b.market) || b.confidence - a.confidence
   );
   const hasResult = match.status === "finished" && match.homeScore !== null && match.awayScore !== null;
+  const h2h = parseH2H(match.h2hJson);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -96,6 +157,67 @@ export function MatchDetailDialog({ match, open, onOpenChange }: Props) {
         </DialogHeader>
         <ScrollArea className="max-h-[60vh]">
           <div className="p-5 space-y-5">
+            {/* Recent form */}
+            {(match.homeForm || match.awayForm) && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-md border border-border/50 p-3">
+                  <div className="text-xs text-muted-foreground mb-1.5 truncate" title={match.homeTeam}>
+                    {match.homeTeam} · Last 5
+                  </div>
+                  <FormBadges form={match.homeForm} />
+                </div>
+                <div className="rounded-md border border-border/50 p-3">
+                  <div className="text-xs text-muted-foreground mb-1.5 truncate" title={match.awayTeam}>
+                    {match.awayTeam} · Last 5
+                  </div>
+                  <FormBadges form={match.awayForm} />
+                </div>
+              </div>
+            )}
+
+            {/* Head-to-head */}
+            {h2h && h2h.totalGames > 0 && (
+              <div className="rounded-md border border-border/50 p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Head-to-Head ({h2h.totalGames} meetings)
+                  </h3>
+                  <div className="flex gap-1.5 text-[10px] font-semibold">
+                    <Badge variant="outline" className="border-emerald-500/40 text-emerald-600 dark:text-emerald-400">
+                      {match.homeTeam.split(" ")[0]}: {h2h.homeWins}
+                    </Badge>
+                    <Badge variant="outline" className="border-amber-500/40 text-amber-600 dark:text-amber-400">
+                      Draws: {h2h.draws}
+                    </Badge>
+                    <Badge variant="outline" className="border-blue-500/40 text-blue-600 dark:text-blue-400">
+                      {match.awayTeam.split(" ")[0]}: {h2h.awayWins}
+                    </Badge>
+                  </div>
+                </div>
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {h2h.lastMatches.slice(0, 8).map((m, i) => (
+                    <div key={i} className="flex items-center gap-2 text-xs py-1 border-b border-border/30 last:border-0">
+                      <span className="text-muted-foreground font-mono text-[10px] w-24 shrink-0">
+                        {m.date ? new Date(m.date).toLocaleDateString("en-GB", { year: "numeric", month: "short", day: "numeric" }) : "—"}
+                      </span>
+                      <span className="flex-1 truncate text-right" title={m.homeTeam}>{m.homeTeam}</span>
+                      <span className={
+                        "font-bold tabular-nums px-1.5 py-0.5 rounded text-[10px] " +
+                        (m.result === "home"
+                          ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          : m.result === "away"
+                            ? "bg-blue-500/15 text-blue-600 dark:text-blue-400"
+                            : "bg-amber-500/15 text-amber-600 dark:text-amber-400")
+                      }>
+                        {m.homeScore}-{m.awayScore}
+                      </span>
+                      <span className="flex-1 truncate" title={m.awayTeam}>{m.awayTeam}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div>
               <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">
                 All Markets ({sorted.length})

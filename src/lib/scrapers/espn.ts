@@ -214,6 +214,40 @@ interface EspnSummaryResponse {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// H2H (head-to-head) types
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface EspnH2HGame {
+  date?: string;
+  competitions?: {
+    competitors?: {
+      homeAway: "home" | "away";
+      winner?: boolean;
+      score?: string;
+      team?: { displayName?: string; abbreviation?: string; logo?: string };
+    }[];
+    status?: { type?: { state?: string; completed?: boolean } };
+  }[];
+}
+
+export interface H2HMatch {
+  date: string | null;
+  homeTeam: string;
+  awayTeam: string;
+  homeScore: number;
+  awayScore: number;
+  result: "home" | "away" | "draw";
+}
+
+export interface H2HSummary {
+  totalGames: number;
+  homeWins: number;
+  awayWins: number;
+  draws: number;
+  lastMatches: H2HMatch[]; // most recent first, capped at 10
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // American odds → decimal odds converter
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -280,19 +314,77 @@ async function fetchLeagueScoreboard(
 }
 
 /**
- * Fetch the summary endpoint for a single match to get odds.
- * ESPN's summary endpoint returns DraftKings odds (when available).
+ * Fetch the summary endpoint for a single match to get odds + H2H.
+ * ESPN's summary endpoint returns DraftKings odds (when available) and
+ * the headToHeadGames array containing previous meetings between the two teams.
  */
 async function fetchMatchSummary(
   leagueCode: string,
   eventId: string
-): Promise<EspnOddsEntry[]> {
+): Promise<{ odds: EspnOddsEntry[]; h2h: H2HSummary | null }> {
   const url = `${SOURCE_URL}/${leagueCode}/summary?event=${eventId}`;
   const json = (await fetchEspnJson(url)) as EspnSummaryResponse | null;
-  if (!json) return [];
+  if (!json) return { odds: [], h2h: null };
   // odds[0] is the primary entry (DraftKings). pickcenter has duplicates.
   const odds = json.odds ?? [];
-  return odds;
+  const h2h = parseH2H(json.headToHeadGames);
+  return { odds, h2h };
+}
+
+/**
+ * Parse ESPN's headToHeadGames array into a structured H2H summary.
+ * Each entry represents a past meeting between the two teams.
+ */
+function parseH2H(headToHeadGames: unknown): H2HSummary | null {
+  if (!Array.isArray(headToHeadGames) || headToHeadGames.length === 0) return null;
+
+  const matches: H2HMatch[] = [];
+  let homeWins = 0;
+  let awayWins = 0;
+  let draws = 0;
+
+  for (const game of headToHeadGames as EspnH2HGame[]) {
+    const comp = game.competitions?.[0];
+    if (!comp?.competitors || comp.competitors.length < 2) continue;
+    const homeC = comp.competitors.find((c) => c.homeAway === "home") ?? comp.competitors[0];
+    const awayC = comp.competitors.find((c) => c.homeAway === "away") ?? comp.competitors[1];
+    if (!homeC?.team?.displayName || !awayC?.team?.displayName) continue;
+
+    const homeScore = homeC.score ? parseInt(homeC.score, 10) : 0;
+    const awayScore = awayC.score ? parseInt(awayC.score, 10) : 0;
+    if (Number.isNaN(homeScore) || Number.isNaN(awayScore)) continue;
+
+    let result: "home" | "away" | "draw";
+    if (homeScore > awayScore) { result = "home"; homeWins++; }
+    else if (awayScore > homeScore) { result = "away"; awayWins++; }
+    else { result = "draw"; draws++; }
+
+    matches.push({
+      date: game.date ?? null,
+      homeTeam: homeC.team.displayName,
+      awayTeam: awayC.team.displayName,
+      homeScore,
+      awayScore,
+      result,
+    });
+  }
+
+  if (matches.length === 0) return null;
+
+  // Sort by date descending (most recent first) and cap at 10
+  matches.sort((a, b) => {
+    if (!a.date) return 1;
+    if (!b.date) return -1;
+    return b.date.localeCompare(a.date);
+  });
+
+  return {
+    totalGames: matches.length,
+    homeWins,
+    awayWins,
+    draws,
+    lastMatches: matches.slice(0, 10),
+  };
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -345,7 +437,8 @@ function buildPredictionFromEvent(
   event: EspnEvent,
   league: LeagueSpec,
   oddsEntries: EspnOddsEntry[],
-  targetDate: string
+  targetDate: string,
+  h2h: H2HSummary | null = null
 ): ScrapedMatchData | null {
   const comp = event.competitions?.[0];
   if (!comp || !comp.competitors || comp.competitors.length < 2) return null;
@@ -582,6 +675,7 @@ function buildPredictionFromEvent(
       awayLogo: awayC.team.logo,
       espnStatus: comp.status?.type?.state,
       espnStatusDetail: comp.status?.type?.detail,
+      h2h: h2h,
       espnOdds: odds0 ? {
         provider: odds0.provider?.name,
         details: odds0.details,
@@ -659,10 +753,13 @@ export async function scrapeEspn(targetDate?: string): Promise<ScrapeResult> {
         // Only fetch summary if match hasn't started yet (pre) — saves bandwidth
         const state = event.competitions?.[0]?.status?.type?.state;
         let oddsEntries: EspnOddsEntry[] = [];
+        let h2h: H2HSummary | null = null;
         if (state === "pre" || state === undefined) {
-          oddsEntries = await fetchMatchSummary(league.code, event.id);
+          const summary = await fetchMatchSummary(league.code, event.id);
+          oddsEntries = summary.odds;
+          h2h = summary.h2h;
         }
-        return buildPredictionFromEvent(event, league, oddsEntries, dateStr);
+        return buildPredictionFromEvent(event, league, oddsEntries, dateStr, h2h);
       })
     );
     for (const m of batchResults) {

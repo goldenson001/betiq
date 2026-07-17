@@ -80,6 +80,7 @@ export const MARKETS = [
   "1x2",
   "htft",
   "btts",
+  "win_btts",
   "ou15",
   "ou25",
   "ou35",

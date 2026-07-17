@@ -60,6 +60,9 @@ interface MatchesResponse {
       status: string;
       homeScore: number | null;
       awayScore: number | null;
+      homeForm: string | null;
+      awayForm: string | null;
+      h2hJson: string | null;
       league: { id: string; name: string; country: string } | null;
       predictions: Array<{
         id: string;
