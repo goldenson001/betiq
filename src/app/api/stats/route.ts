@@ -41,6 +41,16 @@ export async function GET(req: NextRequest) {
     .sort((a, b) => b.probability - a.probability)
     .slice(0, 5);
 
+  // Safe High-Odds picks — investment-grade picks with HIGHER ODDS (1.50–2.50)
+  // that pass ALL safety precautions: multi-source consensus, strong edge,
+  // positive Kelly, safe market. These are surfaced in the dedicated
+  // "Safe High-Odds" tab. Sort by edge desc (best value first), break ties
+  // by odds desc (highest return first).
+  const safeHighOddsPicks = predictions
+    .filter((p) => p.isSafeHighOdds)
+    .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0) || (b.bookOdds ?? 0) - (a.bookOdds ?? 0))
+    .slice(0, 10);
+
   // Group matches by league
   const leagueCounts = new Map<string, number>();
   for (const m of matches) {
@@ -59,6 +69,7 @@ export async function GET(req: NextRequest) {
       topPicksCount: predictions.filter((p) => p.isTopPick).length,
       valueBetsCount: predictions.filter((p) => p.isValueBet).length,
       safePicksCount: predictions.filter((p) => p.isSafePick).length,
+      safeHighOddsCount: predictions.filter((p) => p.isSafeHighOdds).length,
     },
     leagueCounts: Array.from(leagueCounts.entries()).map(([name, count]) => ({ name, count })),
     topPicks: topPicks.map((p) => ({
@@ -71,6 +82,7 @@ export async function GET(req: NextRequest) {
       bookOdds: p.bookOdds,
       edge: p.edge,
       isSafePick: p.isSafePick,
+      isSafeHighOdds: p.isSafeHighOdds,
       consensusSources: p.consensusSources,
       recommendedStake: p.recommendedStake,
       clv: p.clv,
@@ -85,6 +97,7 @@ export async function GET(req: NextRequest) {
       bookOdds: p.bookOdds,
       edge: p.edge,
       isSafePick: p.isSafePick,
+      isSafeHighOdds: p.isSafeHighOdds,
       consensusSources: p.consensusSources,
       recommendedStake: p.recommendedStake,
       clv: p.clv,
@@ -98,6 +111,20 @@ export async function GET(req: NextRequest) {
       probability: p.probability,
       bookOdds: p.bookOdds,
       edge: p.edge,
+      consensusSources: p.consensusSources,
+      recommendedStake: p.recommendedStake,
+      clv: p.clv,
+    })),
+    safeHighOddsPicks: safeHighOddsPicks.map((p) => ({
+      id: p.id,
+      match: `${p.match.homeTeam} v ${p.match.awayTeam}`,
+      market: p.market,
+      selection: p.selection,
+      confidence: p.confidence,
+      probability: p.probability,
+      bookOdds: p.bookOdds,
+      edge: p.edge,
+      isSafePick: p.isSafePick,
       consensusSources: p.consensusSources,
       recommendedStake: p.recommendedStake,
       clv: p.clv,

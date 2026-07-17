@@ -16,6 +16,12 @@ export interface PredictionView {
   isValueBet: boolean;
   /** True when this is the lower-risk side of its market (prob >= 0.55 binary / >= 0.50 1X2). */
   isSafePick?: boolean;
+  /**
+   * True when this pick combines HIGHER ODDS (1.50–2.50) with ALL safety
+   * precautions: multi-source consensus, strong edge, positive Kelly, safe
+   * market. Investment-grade higher-odds picks.
+   */
+  isSafeHighOdds?: boolean;
   /** Number of distinct sources agreeing on this pick. */
   consensusSources?: number;
   sourcesJson: string | null;
@@ -32,6 +38,7 @@ export function PredictionRow({ p, compact = false }: { p: PredictionView; compa
   const isValue = p.isValueBet;
   const isTop = p.isTopPick;
   const isSafe = p.isSafePick === true;
+  const isSafeHighOdds = p.isSafeHighOdds === true;
   const hasKelly = p.recommendedStake !== undefined && p.recommendedStake !== null && p.recommendedStake > 0;
   const hasClv = p.clv !== undefined && p.clv !== null;
   const consensus = p.consensusSources ?? 0;
@@ -41,8 +48,9 @@ export function PredictionRow({ p, compact = false }: { p: PredictionView; compa
         "flex items-center gap-2 px-2.5 rounded-md border border-border/50 transition-colors hover:bg-accent/30",
         compact ? "py-1.5" : "py-2",
         isTop && "bg-primary/5 border-primary/40",
-        isValue && "ring-1 ring-amber-400/40",
-        isSafe && !isTop && "bg-emerald-500/5 border-emerald-500/30"
+        isSafeHighOdds && "bg-cyan-500/5 border-cyan-500/40 ring-1 ring-cyan-400/30",
+        isValue && !isSafeHighOdds && "ring-1 ring-amber-400/40",
+        isSafe && !isTop && !isSafeHighOdds && "bg-emerald-500/5 border-emerald-500/30"
       )}
     >
       <div className="flex-1 min-w-0">
@@ -53,6 +61,11 @@ export function PredictionRow({ p, compact = false }: { p: PredictionView; compa
           {isTop && (
             <span className="text-[9px] font-bold uppercase tracking-wider text-primary-foreground bg-primary px-1 py-0.5 rounded">
               Top
+            </span>
+          )}
+          {isSafeHighOdds && (
+            <span className="text-[9px] font-bold uppercase tracking-wider text-cyan-950 bg-cyan-400 px-1 py-0.5 rounded">
+              SAFE HI-ODDS
             </span>
           )}
           {isSafe && (

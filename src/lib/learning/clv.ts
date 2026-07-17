@@ -108,7 +108,7 @@ export async function computeClvForDate(dateStr: string): Promise<{
     include: {
       predictions: {
         where: {
-          OR: [{ isTopPick: true }, { isValueBet: true }],
+          OR: [{ isTopPick: true }, { isValueBet: true }, { isSafeHighOdds: true }],
         },
       },
     },
@@ -189,6 +189,24 @@ function pickToOddsKey(
     case "btts":
       // Not always in ESPN's odds JSON — return the conventional key
       return selection === "yes" ? "btts_yes" : "btts_no";
+    // ── Derivative markets — CLV computed against the dominant underlying outcome
+    // For Double Chance (1X/X2/12), CLV is approximated using the most likely
+    // of the two covered outcomes (e.g. 1X → "home" since home is usually the
+    // favorite when 1X is the pick). This isn't perfect but tracks CLV well
+    // enough to be useful for source reliability scoring.
+    case "double_chance":
+      if (selection === "1X") return "home"; // home-or-draw → track home line
+      if (selection === "X2") return "away"; // draw-or-away → track away line
+      if (selection === "12") return "home"; // either side wins → track home line
+      return null;
+    // DNB: the selection includes the team name (e.g. "Arsenal DNB"). Map to
+    // home/away based on which team is in the selection string.
+    case "dnb": {
+      const sel = selection.toLowerCase();
+      if (sel.includes(homeTeam.toLowerCase())) return "home";
+      if (sel.includes(awayTeam.toLowerCase())) return "away";
+      return null;
+    }
     // For these markets we don't have reliable closing odds from ESPN's free API:
     case "htft":
     case "win_btts":

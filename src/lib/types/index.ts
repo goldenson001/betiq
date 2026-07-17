@@ -77,6 +77,14 @@ export interface EnginePrediction {
    */
   isSafePick?: boolean;
   /**
+   * Safest high-odds flag — true when this pick combines HIGHER ODDS
+   * (1.50–2.50 by default) with ALL strict safety precautions: multi-source
+   * consensus, strong edge (≥4%), positive Kelly, safe market. These are
+   * investment-grade picks that give meaningful returns without sacrificing
+   * safety. Filled in by the post-process pass.
+   */
+  isSafeHighOdds?: boolean;
+  /**
    * Consensus strength — number of distinct sources that agree on this pick.
    * 0 when only the engine inferred the pick (no source coverage). Filled in
    * by the post-process pass; individual gen* functions may omit it.
@@ -105,6 +113,14 @@ export const MARKETS = [
   "cards_ou",
   "correct_score",
   "bet_builder",
+  // ── Derivative markets derived from 1X2 probabilities ─────────────────────
+  // double_chance: 1X / X2 / 12 — covers 2 of 3 outcomes, lower odds but very
+  // high probability (the "safest" pick in a match).
+  "double_chance",
+  // dnb: Draw No Bet — stake refunded on draw. Effective probability
+  // conditions on non-draw outcomes. Slightly higher odds than 1X2 for the
+  // same side (the draw risk is removed).
+  "dnb",
 ] as const;
 
 export type Market = (typeof MARKETS)[number];

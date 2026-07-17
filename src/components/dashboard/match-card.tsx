@@ -30,6 +30,8 @@ interface MatchCardProps {
 
 const MARKET_ORDER = [
   "1x2",
+  "double_chance",
+  "dnb",
   "htft",
   "btts",
   "win_btts",

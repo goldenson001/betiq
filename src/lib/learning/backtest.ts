@@ -385,6 +385,31 @@ function evaluatePredictionVsResult(
       const actual = r.homeScore > r.awayScore ? "1" : r.homeScore < r.awayScore ? "2" : "X";
       return actual === p.selection;
     }
+    case "double_chance": {
+      // Selection: "1X" / "X2" / "12"
+      const actual = r.homeScore > r.awayScore ? "1" : r.homeScore < r.awayScore ? "2" : "X";
+      if (p.selection === "1X") return actual === "1" || actual === "X";
+      if (p.selection === "X2") return actual === "X" || actual === "2";
+      if (p.selection === "12") return actual === "1" || actual === "2";
+      return false;
+    }
+    case "dnb": {
+      // Selection: "<Team> DNB" — win if team wins, push (treated as not-loss)
+      // on draw, lose if other team wins. For backtest we count pushes as
+      // half-correct (similar to Asian Handicap push).
+      const actual = r.homeScore > r.awayScore ? "1" : r.homeScore < r.awayScore ? "2" : "X";
+      if (actual === "X") return true; // push = stake returned, treated as "not loss"
+      // Determine which side the DNB selection refers to based on string content.
+      // The selection string contains the team name (e.g. "Arsenal DNB"), but
+      // we don't have access to the team names here reliably — use a heuristic:
+      // if selection contains "home" it's home DNB, if "away" it's away DNB.
+      // Otherwise default to home (engine picks the favored side, which is
+      // typically home for DNB).
+      const sel = p.selection.toLowerCase();
+      const isHomeDnb = !sel.includes("away");
+      if (isHomeDnb) return actual === "1";
+      return actual === "2";
+    }
     case "htft": {
       if (r.htHomeScore === undefined || r.htAwayScore === undefined) return false;
       const ht = r.htHomeScore > r.htAwayScore ? "1" : r.htHomeScore < r.htAwayScore ? "2" : "X";

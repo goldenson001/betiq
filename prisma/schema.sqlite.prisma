@@ -154,6 +154,12 @@ model Prediction {
   isTopPick   Boolean  @default(false)
   isValueBet  Boolean  @default(false)
   isSafePick      Boolean  @default(false)
+  // ── Safest High-Odds tier — investment-grade picks with odds in 1.50–2.50 ──
+  // True when this pick combines higher odds with all safety precautions:
+  // multi-source consensus, strong edge, positive Kelly, safe market.
+  // Stricter subset of isValueBet. Surfaced in the dedicated "Safe High-Odds"
+  // tab so users can find higher-odds investment-grade picks at a glance.
+  isSafeHighOdds   Boolean  @default(false)
   consensusSources Int     @default(0)
   kellyFraction   Float?
   recommendedStake Float?
@@ -168,6 +174,7 @@ model Prediction {
   @@index([isValueBet])
   @@index([isTopPick])
   @@index([isSafePick])
+  @@index([isSafeHighOdds])
 }
 
 model Parlay {

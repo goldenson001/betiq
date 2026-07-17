@@ -76,6 +76,11 @@ interface MatchesResponse {
         edge: number | null;
         isTopPick: boolean;
         isValueBet: boolean;
+        isSafePick?: boolean;
+        isSafeHighOdds?: boolean;
+        consensusSources?: number;
+        recommendedStake?: number | null;
+        clv?: number | null;
         sourcesJson: string | null;
       }>;
     }>;
@@ -107,6 +112,7 @@ interface StatsResponse {
     topPicksCount: number;
     valueBetsCount: number;
     safePicksCount: number;
+    safeHighOddsCount: number;
   };
   leagueCounts: Array<{ name: string; count: number }>;
   topPicks: Array<{
@@ -119,6 +125,7 @@ interface StatsResponse {
     bookOdds: number | null;
     edge: number | null;
     isSafePick?: boolean;
+    isSafeHighOdds?: boolean;
     consensusSources?: number;
     recommendedStake?: number | null;
     clv?: number | null;
@@ -133,6 +140,7 @@ interface StatsResponse {
     bookOdds: number | null;
     edge: number | null;
     isSafePick?: boolean;
+    isSafeHighOdds?: boolean;
     consensusSources?: number;
     recommendedStake?: number | null;
     clv?: number | null;
@@ -146,6 +154,20 @@ interface StatsResponse {
     probability?: number;
     bookOdds: number | null;
     edge: number | null;
+    consensusSources?: number;
+    recommendedStake?: number | null;
+    clv?: number | null;
+  }>;
+  safeHighOddsPicks?: Array<{
+    id: string;
+    match: string;
+    market: string;
+    selection: string;
+    confidence: number;
+    probability?: number;
+    bookOdds: number | null;
+    edge: number | null;
+    isSafePick?: boolean;
     consensusSources?: number;
     recommendedStake?: number | null;
     clv?: number | null;
@@ -443,6 +465,12 @@ export default function Home() {
                 <Zap className="h-3 w-3" />
                 {totalPredictions} predictions
               </Badge>
+              {statsQuery.data && statsQuery.data.stats.safeHighOddsCount > 0 && (
+                <Badge variant="secondary" className="gap-1 text-xs border-cyan-400 text-cyan-700 dark:text-cyan-300">
+                  <TrendingUp className="h-3 w-3" />
+                  {statsQuery.data.stats.safeHighOddsCount} safe hi-odds
+                </Badge>
+              )}
               {statsQuery.data && statsQuery.data.stats.safePicksCount > 0 && (
                 <Badge variant="secondary" className="gap-1 text-xs border-emerald-400 text-emerald-700 dark:text-emerald-300">
                   <Shield className="h-3 w-3" />
@@ -462,6 +490,9 @@ export default function Home() {
               </TabsTrigger>
               <TabsTrigger value="parlays" className="gap-1.5 text-xs sm:text-sm">
                 <Trophy className="h-3.5 w-3.5" /> Parlays
+              </TabsTrigger>
+              <TabsTrigger value="safe-high-odds" className="gap-1.5 text-xs sm:text-sm">
+                <TrendingUp className="h-3.5 w-3.5" /> Safe High-Odds
               </TabsTrigger>
               <TabsTrigger value="safe" className="gap-1.5 text-xs sm:text-sm">
                 <Shield className="h-3.5 w-3.5" /> Safe Picks
@@ -609,6 +640,78 @@ export default function Home() {
                     <ParlayCard key={p.id} parlay={p} />
                   ))}
               </div>
+            )}
+          </TabsContent>
+
+          {/* Safe High-Odds tab — investment-grade picks with odds 1.50-2.50 */}
+          <TabsContent value="safe-high-odds" className="space-y-3 mt-4">
+            {statsQuery.isLoading ? (
+              <div className="space-y-2">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <Skeleton key={i} className="h-16 rounded-md" />
+                ))}
+              </div>
+            ) : statsQuery.isError || !statsQuery.data || !statsQuery.data.safeHighOddsPicks || statsQuery.data.safeHighOddsPicks.length === 0 ? (
+              <Card>
+                <CardContent className="py-12 text-center">
+                  <TrendingUp className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
+                  <p className="text-sm font-medium">No Safe High-Odds picks available for {date}</p>
+                  <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
+                    Safe High-Odds picks combine higher odds (1.50–2.50) with all safety
+                    precautions: multi-source consensus (≥2), strong edge (≥4%), positive
+                    Kelly stake, and safe markets only (1X2, O/U 2.5/3.5, BTTS, Asian
+                    Handicap, Double Chance, Draw No Bet).
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    If none qualify today, the engine couldn&apos;t find higher-odds picks
+                    that pass every safety check — try the Safe Picks tab for lower-odds
+                    near-guaranteed returns instead.
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <TrendingUp className="h-4 w-4 text-cyan-500" />
+                    Safe High-Odds Picks
+                  </h3>
+                  <Badge variant="secondary" className="text-xs border-cyan-400 text-cyan-700 dark:text-cyan-300">
+                    {statsQuery.data.stats.safeHighOddsCount} total
+                  </Badge>
+                </div>
+                <div className="space-y-1.5">
+                  {statsQuery.data.safeHighOddsPicks.map((v) => (
+                    <PredictionRow
+                      key={v.id}
+                      p={{
+                        id: v.id,
+                        market: v.market,
+                        selection: v.selection,
+                        confidence: v.confidence,
+                        probability: v.probability ?? 0,
+                        fairOdds: v.bookOdds ?? 0,
+                        bookOdds: v.bookOdds,
+                        edge: v.edge,
+                        isTopPick: false,
+                        isValueBet: true,
+                        isSafePick: v.isSafePick,
+                        isSafeHighOdds: true,
+                        consensusSources: v.consensusSources,
+                        sourcesJson: null,
+                        recommendedStake: v.recommendedStake,
+                        clv: v.clv,
+                      }}
+                    />
+                  ))}
+                  <p className="text-xs text-muted-foreground italic text-center pt-2">
+                    Showing top {statsQuery.data.safeHighOddsPicks.length} investment-grade
+                    picks with odds in 1.50–2.50 band for {date}. Each pick clears
+                    multi-source consensus, strong edge, positive Kelly, and safe-market
+                    checks — meaningful upside with all safety precautions intact.
+                  </p>
+                </div>
+              </>
             )}
           </TabsContent>
 

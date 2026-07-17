@@ -79,6 +79,8 @@ export function marketLabel(market: string): string {
     cards_ou: "Cards Over/Under",
     correct_score: "Correct Score",
     bet_builder: "Bet Builder",
+    double_chance: "Double Chance",
+    dnb: "Draw No Bet",
   };
   return labels[market] ?? market;
 }
@@ -97,5 +99,12 @@ export function selectionLabel(market: string, selection: string): string {
     // Selections like "Arsenal win + BTTS" pass through
     return selection;
   }
+  if (market === "double_chance") {
+    if (selection === "1X") return "Home Win or Draw";
+    if (selection === "X2") return "Draw or Away Win";
+    if (selection === "12") return "Home Win or Away Win";
+  }
+  // DNB selections pass through with their team name (e.g. "Arsenal DNB")
+  // btts / ou / etc. pass through unchanged
   return selection;
 }

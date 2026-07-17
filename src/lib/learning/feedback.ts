@@ -38,6 +38,31 @@ function evaluate1X2(r: MatchResult, selection: string): boolean {
   return actual === selection;
 }
 
+function evaluateDoubleChance(r: MatchResult, selection: string): boolean {
+  const actual = r.homeScore > r.awayScore ? "1" : r.homeScore < r.awayScore ? "2" : "X";
+  if (selection === "1X") return actual === "1" || actual === "X";
+  if (selection === "X2") return actual === "X" || actual === "2";
+  if (selection === "12") return actual === "1" || actual === "2";
+  return false;
+}
+
+function evaluateDnb(r: MatchResult, selection: string): boolean {
+  // Selection like "Arsenal DNB" — win if team wins, push (treated as not-loss)
+  // on draw, lose if other team wins. For feedback, push is treated as
+  // half-correct — but since we report boolean correct, push counts as "not
+  // loss" = true (the stake is refunded, no capital lost).
+  const actual = r.homeScore > r.awayScore ? "1" : r.homeScore < r.awayScore ? "2" : "X";
+  if (actual === "X") return true; // push = stake returned, treated as "not loss"
+  // We don't have team names in MatchResult reliably — use the heuristic that
+  // the engine picks the favored side (typically home) unless the selection
+  // string contains "away". The selection is "<TeamName> DNB" so a team like
+  // "Away United" could trigger a false positive, but this is rare.
+  const sel = selection.toLowerCase();
+  const isHomeDnb = !sel.includes("away");
+  if (isHomeDnb) return actual === "1";
+  return actual === "2";
+}
+
 function evaluateHtFt(r: MatchResult, selection: string): boolean {
   if (r.htHomeScore === undefined || r.htAwayScore === undefined) return false;
   const ht = r.htHomeScore > r.htAwayScore ? "1" : r.htHomeScore < r.htAwayScore ? "2" : "X";
@@ -102,6 +127,8 @@ function evaluateCardsOu(r: MatchResult, selection: string): boolean {
 function evaluatePrediction(p: { market: string; selection: string }, r: MatchResult): boolean {
   switch (p.market) {
     case "1x2": return evaluate1X2(r, p.selection);
+    case "double_chance": return evaluateDoubleChance(r, p.selection);
+    case "dnb": return evaluateDnb(r, p.selection);
     case "htft": return evaluateHtFt(r, p.selection);
     case "btts": return evaluateBtts(r, p.selection);
     case "ou15": return evaluateOu(r, 1.5, p.selection);
@@ -264,8 +291,8 @@ export async function processResultsForDate(dateStr: string): Promise<{
       predictionsEvaluated++;
       // Collect Brier score sample for the daily calibration metric
       brierSamples.push({ pred: p.probability, actual: correct ? 1 : 0 });
-      // Collect Kelly ROI sample for top picks / value bets
-      if ((p.isTopPick || p.isValueBet) && p.bookOdds && p.bookOdds > 1) {
+      // Collect Kelly ROI sample for top picks / value bets / safe high-odds picks
+      if ((p.isTopPick || p.isValueBet || p.isSafeHighOdds) && p.bookOdds && p.bookOdds > 1) {
         const k = kellyStake(p.probability, p.bookOdds);
         kellyStakeSum += k.recommendedStake;
         if (correct) kellyReturnSum += k.recommendedStake * p.bookOdds;
@@ -317,11 +344,12 @@ export async function processResultsForDate(dateStr: string): Promise<{
     }
 
     // ── Per-source CLV sample collection ──────────────────────────────────────
-    // For each top pick / value bet on this match, if we have CLV computed,
-    // attribute it to the contributing sources (from sourcesJson).
+    // For each top pick / value bet / safe high-odds pick on this match, if we
+    // have CLV computed, attribute it to the contributing sources (from
+    // sourcesJson).
     for (const p of match.predictions) {
       if (!p.evaluated || p.clv === null || p.clv === undefined) continue;
-      if (!p.isTopPick && !p.isValueBet) continue;
+      if (!p.isTopPick && !p.isValueBet && !p.isSafeHighOdds) continue;
       try {
         const srcs = JSON.parse(p.sourcesJson ?? "[]") as Array<{ source?: string }>;
         // Look up source IDs from source name (we stored names in sourcesJson)

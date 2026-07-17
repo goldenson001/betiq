@@ -214,6 +214,9 @@ const MARKET_MARGINS: Record<string, number> = {
   "htft": 0.10,            // 10% — 9 outcomes, very high margin
   "win_btts": 0.06,        // 6%
   "bet_builder": 0.05,     // 5% — composite
+  // ── Derivative markets (sharper than 1X2 because they reduce outcomes) ─────
+  "double_chance": 0.035,  // 3.5% — fewer outcomes (2 of 3), tighter pricing
+  "dnb": 0.025,            // 2.5% — binary outcome (conditional on non-draw), very sharp
 };
 
 /**
@@ -427,6 +430,244 @@ function gen1X2(ctx: MatchContext): EnginePrediction {
     isValueBet: false,
     isSafePick: false, // filled in by post-process pass
     consensusSources: sources.length,
+    sources,
+  };
+}
+
+/**
+ * Compute weighted 1X2 probabilities (pHome, pDraw, pAway) using the same
+ * logic as gen1X2 but returning the full probability vector. Used by
+ * derivative market generators (Double Chance, DNB) so they don't have to
+ * re-derive the same blend math.
+ *
+ * Returns null if no sources contributed any 1X2 signal.
+ */
+function compute1X2Probabilities(ctx: MatchContext): {
+  pHome: number;
+  pDraw: number;
+  pAway: number;
+  homePickSources: number;
+  awayPickSources: number;
+  drawPickSources: number;
+} | null {
+  const picks: SourcePick[] = ctx.rawPredictions
+    .filter((r) => r.prediction["1x2"])
+    .map((r) => ({
+      sourceId: r.sourceId,
+      sourceName: r.sourceName,
+      weight: r.weight,
+      pick: r.prediction["1x2"] as string,
+      probabilities: r.prediction.probabilities,
+      odds: r.prediction.odds,
+      calibrationA: r.calibrationA,
+      calibrationB: r.calibrationB,
+    }));
+  if (picks.length === 0) return null;
+
+  // ── Mode-based probabilities (counting source weight per pick) ────────────
+  const tally: Record<string, { weight: number; sources: number }> = {
+    "1": { weight: 0, sources: 0 },
+    X: { weight: 0, sources: 0 },
+    "2": { weight: 0, sources: 0 },
+  };
+  for (const p of picks) {
+    if (tally[p.pick]) {
+      tally[p.pick].weight += p.weight;
+      tally[p.pick].sources += 1;
+    }
+  }
+  const totalWeight = picks.reduce((s, p) => s + p.weight, 0) || 1;
+  let pHome = tally["1"].weight / totalWeight;
+  let pDraw = tally.X.weight / totalWeight;
+  let pAway = tally["2"].weight / totalWeight;
+
+  // ── Blend with explicit (calibrated) probabilities if sources expose them ─
+  const probSources = ctx.rawPredictions.filter((r) => r.prediction.probabilities);
+  if (probSources.length > 0) {
+    let sumW = 0;
+    let eHome = 0, eDraw = 0, eAway = 0;
+    for (const r of probSources) {
+      const pr = r.prediction.probabilities!;
+      const w = r.weight;
+      const a = r.calibrationA ?? 1;
+      const b = r.calibrationB ?? 0;
+      eHome += applyPlatt(pr.home ?? 0.33, a, b) * w;
+      eDraw += applyPlatt(pr.draw ?? 0.33, a, b) * w;
+      eAway += applyPlatt(pr.away ?? 0.33, a, b) * w;
+      sumW += w;
+    }
+    if (sumW > 0) {
+      eHome /= sumW; eDraw /= sumW; eAway /= sumW;
+      const sumP = eHome + eDraw + eAway;
+      if (sumP > 0) { eHome /= sumP; eDraw /= sumP; eAway /= sumP; }
+      // Blend 40% explicit probabilities with 60% mode-derived
+      pHome = 0.6 * pHome + 0.4 * eHome;
+      pDraw = 0.6 * pDraw + 0.4 * eDraw;
+      pAway = 0.6 * pAway + 0.4 * eAway;
+      // Re-normalize after blend
+      const s = pHome + pDraw + pAway;
+      if (s > 0) { pHome /= s; pDraw /= s; pAway /= s; }
+    }
+  }
+
+  // ── Apply form adjustment (mirrors gen1X2) ────────────────────────────────
+  const formAdj = formAdjustment(ctx.homeForm, ctx.awayForm);
+  pHome = Math.max(0.05, Math.min(0.92, pHome + formAdj));
+  pAway = Math.max(0.05, Math.min(0.92, pAway - formAdj));
+  const sumP = pHome + pDraw + pAway;
+  if (sumP > 0) { pHome /= sumP; pDraw /= sumP; pAway /= sumP; }
+
+  return {
+    pHome,
+    pDraw,
+    pAway,
+    homePickSources: tally["1"].sources,
+    awayPickSources: tally["2"].sources,
+    drawPickSources: tally.X.sources,
+  };
+}
+
+/**
+ * Double Chance market — 1X / X2 / 12.
+ *
+ * Each selection covers 2 of 3 outcomes, so the probability is the sum of the
+ * two covered outcomes:
+ *   - "1X" → P(home win) + P(draw) — wins if home wins OR draw
+ *   - "X2" → P(draw) + P(away win) — wins if away wins OR draw
+ *   - "12" → P(home win) + P(away win) — wins if either side wins (not draw)
+ *
+ * Double Chance typically offers odds in the 1.10–1.40 range (very safe but
+ * low return). The selection with the highest combined probability is picked.
+ *
+ * This market is included to give users an explicit "safest possible" option
+ * for each match — useful for the Safe Picks tab and as a parlay leg when the
+ * user wants near-guaranteed returns.
+ */
+function genDoubleChance(ctx: MatchContext): EnginePrediction {
+  const probs = compute1X2Probabilities(ctx);
+  if (!probs) {
+    return stub("double_chance", "1X", 0.70);
+  }
+  const { pHome, pDraw, pAway, homePickSources, awayPickSources, drawPickSources } = probs;
+  // Combined probabilities for each DC selection
+  const p1X = pHome + pDraw;
+  const pX2 = pDraw + pAway;
+  const p12 = pHome + pAway;
+
+  // Pick the highest-probability selection (the "safest" double chance)
+  let selection: string;
+  let prob: number;
+  let sources: { source: string; pick: string; weight: number }[];
+  // Sources = union of the two contributing pick groups
+  const buildSources = (picks1: number, picks2: number) =>
+    ctx.rawPredictions
+      .filter((r) => r.prediction["1x2"])
+      .slice(0, picks1 + picks2)
+      .map((r) => ({ source: r.sourceName, pick: `1x2:${r.prediction["1x2"]}`, weight: r.weight }));
+
+  if (p1X >= pX2 && p1X >= p12) {
+    selection = "1X";
+    prob = p1X;
+    sources = buildSources(homePickSources, drawPickSources);
+  } else if (pX2 >= p12) {
+    selection = "X2";
+    prob = pX2;
+    sources = buildSources(drawPickSources, awayPickSources);
+  } else {
+    selection = "12";
+    prob = p12;
+    sources = buildSources(homePickSources, awayPickSources);
+  }
+
+  // DC odds reflect 2-of-3 coverage: very high probability → very low odds.
+  // Apply mild margin (4% — typical for DC markets at soft books).
+  const adjusted = clampProbHigh(prob + consensusBoost(Math.max(homePickSources, awayPickSources, drawPickSources)));
+  const bo = resolveBookOdds(adjusted, "double_chance", selection, ctx.marketOdds);
+  return {
+    market: "double_chance",
+    selection,
+    confidence: Math.round(adjusted * 100),
+    probability: adjusted,
+    fairOdds: fairOdds(adjusted),
+    bookOdds: bo,
+    edge: edge(adjusted, bo),
+    isTopPick: false,
+    isValueBet: false,
+    isSafePick: false,
+    consensusSources: sources.length,
+    sources,
+  };
+}
+
+/**
+ * Draw No Bet (DNB) — stake refunded on draw.
+ *
+ * For a given side (home or away):
+ *   - Win if that side wins (full payout at odds)
+ *   - Push (refund) if draw (stake returned, no profit)
+ *   - Lose if other side wins
+ *
+ * Effective probability (conditional on non-draw):
+ *   P(win | not draw) = P(side win) / (P(side win) + P(other side win))
+ *
+ * Fair odds = 1 / P(win | not draw) = (P(side) + P(other)) / P(side)
+ *
+ * DNB odds are typically HIGHER than the corresponding 1X2 odds when the draw
+ * probability is significant (e.g. a 1X2 home at 1.80 might be DNB home at
+ * 2.20 if draw is ~25%). This is the key insight: DNB removes draw-risk while
+ * still offering reasonable odds on the favored side.
+ *
+ * Selection: we pick whichever side has the higher win probability (mirrors
+ * the 1X2 selection but with draw-risk removed).
+ */
+function genDnb(ctx: MatchContext): EnginePrediction {
+  const probs = compute1X2Probabilities(ctx);
+  if (!probs) {
+    return stub("dnb", `${ctx.homeTeam} DNB`, 0.55);
+  }
+  const { pHome, pDraw, pAway, homePickSources, awayPickSources } = probs;
+
+  // Pick the stronger side (mirrors 1X2 selection logic)
+  const pickHome = pHome >= pAway;
+  const sideProb = pickHome ? pHome : pAway;
+  const otherProb = pickHome ? pAway : pHome;
+  const sideSources = pickHome ? homePickSources : awayPickSources;
+  const selection = pickHome
+    ? `${ctx.homeTeam} DNB`
+    : `${ctx.awayTeam} DNB`;
+
+  // Effective probability conditional on non-draw
+  // = P(side wins) / (P(side wins) + P(other wins))
+  // = sideProb / (sideProb + otherProb)
+  // Apply consensus boost first (consistent with 1X2)
+  const adjustedSide = clampProbHigh(sideProb + consensusBoost(sideSources));
+  const adjustedOther = clampProbHigh(otherProb);
+  const denom = Math.max(0.001, adjustedSide + adjustedOther);
+  let effectiveProb = adjustedSide / denom;
+  // DNB probabilities are typically 0.55-0.78 for the favored side (higher
+  // than straight 1X2 because the draw-risk is removed). Cap at 0.92.
+  effectiveProb = Math.max(0.30, Math.min(0.92, effectiveProb));
+
+  // DNB synthesized bookmaker odds use a sharp 2.5% margin (DNB is one of the
+  // sharpest markets — bookmakers can't hide much margin since it's a binary
+  // outcome conditional on non-draw).
+  const bo = resolveBookOdds(effectiveProb, "dnb", selection, ctx.marketOdds);
+  const sources = ctx.rawPredictions
+    .filter((r) => r.prediction["1x2"] === (pickHome ? "1" : "2"))
+    .map((r) => ({ source: r.sourceName, pick: `dnb:${pickHome ? "1" : "2"}`, weight: r.weight }));
+
+  return {
+    market: "dnb",
+    selection,
+    confidence: Math.round(effectiveProb * 100),
+    probability: effectiveProb,
+    fairOdds: fairOdds(effectiveProb),
+    bookOdds: bo,
+    edge: edge(effectiveProb, bo),
+    isTopPick: false,
+    isValueBet: false,
+    isSafePick: false,
+    consensusSources: sideSources,
     sources,
   };
 }
@@ -927,6 +1168,12 @@ function stub(market: string, selection: string, prob: number = 0.5): EnginePred
 export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] {
   const preds: EnginePrediction[] = [];
   preds.push(gen1X2(ctx));
+  // Derivative markets derived from 1X2 probabilities — these give users
+  // alternative ways to bet the same prediction. Double Chance is the safest
+  // (lowest odds, highest probability); DNB removes draw-risk while keeping
+  // reasonable odds (often HIGHER than straight 1X2 for the favored side).
+  preds.push(genDoubleChance(ctx));
+  preds.push(genDnb(ctx));
   preds.push(genHtFt(ctx));
   preds.push(genBtts(ctx));
   preds.push(genWinBtts(ctx));
@@ -952,6 +1199,8 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
     "asian_handicap",
     "corners_ou",
     "cards_ou",
+    // DNB is effectively binary (win or push/lose — push treated as non-loss)
+    "dnb",
   ]);
   for (const p of preds) {
     // consensusSources — populated by gen1X2 above; for other markets infer
@@ -960,7 +1209,7 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
       p.consensusSources = p.sources.length;
     }
     // Apply consensus boost to non-1X2 markets too (1X2 already done above)
-    if (p.market !== "1x2" && p.consensusSources > 0) {
+    if (p.market !== "1x2" && p.market !== "double_chance" && p.market !== "dnb" && p.consensusSources > 0) {
       const boosted = p.probability + consensusBoost(p.consensusSources);
       p.probability = clampProbHigh(boosted);
       p.confidence = Math.round(p.probability * 100);
@@ -976,11 +1225,16 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
     // isSafePick — true when this pick is the lower-risk side of its market.
     // For binary markets, the engine's pick is "safe" if its probability is
     // >= 0.55 (clear lean). For 1X2, "safe" if probability >= 0.50 (favorite).
+    // Double Chance is ALWAYS safe (covers 2 of 3 outcomes).
+    // DNB is safe if conditional prob >= 0.55 (clear favorite after removing draw).
     // Combo / synthetic markets are never marked safe.
     if (BINARY_MARKETS.has(p.market)) {
       p.isSafePick = p.probability >= 0.55;
     } else if (p.market === "1x2") {
       p.isSafePick = p.probability >= 0.50;
+    } else if (p.market === "double_chance") {
+      // Double Chance covers 2 of 3 outcomes — always the safest pick
+      p.isSafePick = p.probability >= 0.65;
     } else {
       p.isSafePick = false;
     }
@@ -994,12 +1248,22 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
   // then break ties by consensus strength, then by confidence. We also
   // require a minimum probability of TOP_PICK_MIN_PROB AND a non-negative
   // edge — if nothing clears both, fall back to the highest-probability pick.
-  const EXCLUDED_TOP_PICK_MARKETS = new Set(["bet_builder", "win_btts", "correct_score"]);
+  //
+  // ── Odds-aware bonus (NEW) ──────────────────────────────────────────────────
+  // To surface picks with HIGHER ODDS without sacrificing safety, we add a
+  // bonus to picks whose bookOdds fall in the "safe high-odds" band
+  // [SAFE_HIGH_ODDS_MIN_ODDS, SAFE_HIGH_ODDS_MAX_ODDS] (default 1.50–2.50).
+  // Picks in this band get a +0.04 bonus (comparable to the safe-pick bonus)
+  // — enough to break ties in favor of higher-odds picks but not enough to
+  // override a clearly safer low-odds favorite.
+  const EXCLUDED_TOP_PICK_MARKETS = new Set(["bet_builder", "win_btts", "correct_score", "htft"]);
   const eligible = preds.filter((p) => !EXCLUDED_TOP_PICK_MARKETS.has(p.market));
   if (eligible.length > 0) {
     const TOP_PICK_MIN_PROB = ENGINE_CONFIG.TOP_PICK_MIN_PROB;
     const SWEET_LOW = ENGINE_CONFIG.TOP_PICK_SWEET_LOW;
     const SWEET_HIGH = ENGINE_CONFIG.TOP_PICK_SWEET_HIGH;
+    const SHO_MIN_ODDS = ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_ODDS;
+    const SHO_MAX_ODDS = ENGINE_CONFIG.SAFE_HIGH_ODDS_MAX_ODDS;
     // Primary candidate set: prob ≥ min AND edge ≥ 0
     const primaryPool = eligible.filter(
       (p) => p.probability >= TOP_PICK_MIN_PROB && (p.edge ?? 0) >= 0
@@ -1024,7 +1288,14 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
         const edgeBonus = Math.min(0.08, Math.max(0, (p.edge ?? 0)) * 0.4);
         const consensusScore = (p.consensusSources ?? 0) * 0.03;
         const safeBonus = p.isSafePick === true ? 0.04 : 0;
-        return { p, score: probScore + edgeBonus + consensusScore + safeBonus };
+        // ── Odds-aware bonus — reward picks in the safe-high-odds band ───────
+        // This nudges the top-pick selection toward higher-odds picks when
+        // they're equally safe, so users see picks with meaningful upside
+        // (1.50–2.50 odds) instead of just low-odds heavy favorites.
+        const odds = p.bookOdds ?? 0;
+        const highOddsBonus =
+          odds >= SHO_MIN_ODDS && odds <= SHO_MAX_ODDS ? 0.04 : 0;
+        return { p, score: probScore + edgeBonus + consensusScore + safeBonus + highOddsBonus };
       })
       .sort((a, b) => b.score - a.score);
     if (scored.length > 0) {
@@ -1045,7 +1316,10 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
   //      Backtests show picks below 2.5% edge have ~neutral long-run ROI.
   //   2. Probability in [VALUE_BET_MIN_PROB, VALUE_BET_MAX_PROB] (default 0.40–0.82).
   //   3. At least VALUE_BET_MIN_SOURCES independent sources agree (default 1).
-  //   4. Exclude combo markets (bet_builder, correct_score, htft) — too noisy.
+  //   4. Bookmaker odds ≥ VALUE_BET_MIN_ODDS (default 1.45) — exclude low-odds
+  //      "value" picks (e.g. O1.5 at 1.20) where the risk/reward is poor even
+  //      with positive edge. A 1.20-odds pick needs 5 wins to offset 1 loss.
+  //   5. Exclude combo markets (bet_builder, correct_score, htft) — too noisy.
   //
   // Consensus bonus still applies: 3+ agreeing sources add +0.04 to edge,
   // 2 sources add +0.02. This rewards broad agreement beyond the hard filter.
@@ -1054,17 +1328,67 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
     const consensusBonus = sources >= 3 ? 0.04 : sources >= 2 ? 0.02 : 0;
     const adjustedEdge = (p.edge ?? 0) + consensusBonus;
     p.edge = adjustedEdge;
+    const odds = p.bookOdds ?? 0;
     if (
       adjustedEdge > ENGINE_CONFIG.VALUE_BET_MIN_EDGE &&
       p.probability >= ENGINE_CONFIG.VALUE_BET_MIN_PROB &&
       p.probability <= ENGINE_CONFIG.VALUE_BET_MAX_PROB &&
       (p.consensusSources ?? 0) >= ENGINE_CONFIG.VALUE_BET_MIN_SOURCES &&
+      odds >= ENGINE_CONFIG.VALUE_BET_MIN_ODDS &&
       p.market !== "bet_builder" &&
       p.market !== "correct_score" &&
       p.market !== "htft"
     ) {
       p.isValueBet = true;
     }
+  }
+
+  // ── Safest High-Odds tier ───────────────────────────────────────────────────
+  // A STRICTER tier than value bets: surfaces picks that combine HIGHER ODDS
+  // (1.50–2.50) with ALL safety precautions. These are the investment-grade
+  // picks the user sees in the "Safe High-Odds" tab.
+  //
+  // Criteria (ALL must hold — see ENGINE_CONFIG.SAFE_HIGH_ODDS_*):
+  //   1. bookOdds in [SAFE_HIGH_ODDS_MIN_ODDS, SAFE_HIGH_ODDS_MAX_ODDS]
+  //   2. probability ≥ SAFE_HIGH_ODDS_MIN_PROB (still safe)
+  //   3. consensus ≥ SAFE_HIGH_ODDS_MIN_SOURCES (multi-source agreement)
+  //   4. edge ≥ SAFE_HIGH_ODDS_MIN_EDGE (well above noise)
+  //   5. Kelly stake > 0 (positive expected value — checked against a 1/4
+  //      fractional Kelly on the bookOdds)
+  //   6. Safe market only — 1X2, O/U 2.5/3.5, BTTS, AH, Double Chance, DNB
+  //
+  // Note: Safe High-Odds picks are ALSO flagged as value bets (they always
+  // clear the value-bet thresholds). The isSafeHighOdds flag is a STRICTER
+  // subset — UI shows them in a dedicated tab so users can find higher-odds
+  // investment-grade picks at a glance.
+  const SAFE_HIGH_ODDS_MARKETS = new Set([
+    "1x2",
+    "ou25",
+    "ou35",
+    "btts",
+    "asian_handicap",
+    "double_chance",
+    "dnb",
+  ]);
+  for (const p of preds) {
+    if (!SAFE_HIGH_ODDS_MARKETS.has(p.market)) continue;
+    const odds = p.bookOdds ?? 0;
+    if (odds < ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_ODDS) continue;
+    if (odds > ENGINE_CONFIG.SAFE_HIGH_ODDS_MAX_ODDS) continue;
+    if (p.probability < ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_PROB) continue;
+    if ((p.consensusSources ?? 0) < ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_SOURCES) continue;
+    if ((p.edge ?? 0) < ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_EDGE) continue;
+    // Kelly check — full Kelly must be positive (positive expected value)
+    if (p.bookOdds && p.bookOdds > 1) {
+      const k = kellyStake(p.probability, p.bookOdds);
+      if (k.fullKelly <= 0) continue;
+    } else {
+      continue;
+    }
+    p.isSafeHighOdds = true;
+    // Safe high-odds picks are ALSO value bets (they clear all value-bet
+    // thresholds by construction: edge ≥ 4% > 2.5%, prob in band, sources ≥ 2).
+    if (!p.isValueBet) p.isValueBet = true;
   }
 
   return preds;
@@ -1206,6 +1530,7 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
           isTopPick: p.isTopPick,
           isValueBet: p.isValueBet,
           isSafePick: p.isSafePick ?? false,
+          isSafeHighOdds: p.isSafeHighOdds ?? false,
           consensusSources: p.consensusSources ?? 0,
           kellyFraction,
           recommendedStake,
