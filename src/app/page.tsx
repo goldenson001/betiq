@@ -134,6 +134,8 @@ interface StatsResponse {
   valueBets: Array<{
     id: string;
     match: string;
+    league?: string | null;
+    kickoffBrussels?: string | null;
     market: string;
     selection: string;
     confidence: number;
@@ -142,6 +144,8 @@ interface StatsResponse {
     edge: number | null;
     isSafePick?: boolean;
     isSafeHighOdds?: boolean;
+    isTopPick?: boolean;
+    isValueBet?: boolean;
     consensusSources?: number;
     recommendedStake?: number | null;
     clv?: number | null;
@@ -816,7 +820,7 @@ export default function Home() {
             )}
           </TabsContent>
 
-          {/* Value bets tab */}
+          {/* Value bets tab — one best value bet per predicted match */}
           <TabsContent value="value" className="space-y-3 mt-4">
             {statsQuery.isLoading ? (
               <div className="space-y-2">
@@ -824,13 +828,13 @@ export default function Home() {
                   <Skeleton key={i} className="h-16 rounded-md" />
                 ))}
               </div>
-            ) : statsQuery.isError || !statsQuery.data || statsQuery.data.valueBets.length === 0 ? (
+            ) : statsQuery.isError || !statsQuery.data || !statsQuery.data.valueBets || statsQuery.data.valueBets.length === 0 ? (
               <Card>
                 <CardContent className="py-12 text-center">
                   <Target className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
-                  <p className="text-sm font-medium">No value bets detected for {date}</p>
+                  <p className="text-sm font-medium">No matches predicted for {date}</p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Value bets are predictions with positive expected value (edge &gt; 2%) and probability between 30–85%.
+                    Run the pipeline to generate predictions, or pick a different date.
                   </p>
                 </CardContent>
               </Card>
@@ -839,38 +843,74 @@ export default function Home() {
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold flex items-center gap-2">
                     <TrendingUp className="h-4 w-4 text-emerald-500" />
-                    Top Value Bets
+                    Best Value Bet Per Match
                   </h3>
                   <Badge variant="secondary" className="text-xs">
-                    {statsQuery.data.valueBets.length} found
+                    {statsQuery.data.stats.valueBetsCount} {statsQuery.data.stats.valueBetsCount === 1 ? "match" : "matches"}
                   </Badge>
                 </div>
-                <div className="space-y-1.5">
-                  {statsQuery.data.valueBets.map((v) => (
-                    <PredictionRow
-                      key={v.id}
-                      p={{
-                        id: v.id,
-                        market: v.market,
-                        selection: v.selection,
-                        confidence: v.confidence,
-                        probability: v.probability ?? 0,
-                        fairOdds: v.bookOdds ?? 0,
-                        bookOdds: v.bookOdds,
-                        edge: v.edge,
-                        isTopPick: false,
-                        isValueBet: true,
-                        isSafePick: v.isSafePick,
-                        consensusSources: v.consensusSources,
-                        sourcesJson: null,
-                        recommendedStake: v.recommendedStake,
-                        clv: v.clv,
-                      }}
-                    />
-                  ))}
+                <div className="space-y-2">
+                  {statsQuery.data.valueBets.map((v) => {
+                    const isTrueValue = v.isValueBet === true;
+                    return (
+                      <div key={v.id} className="rounded-md border border-border/60 bg-card/50 px-3 py-2">
+                        <div className="flex items-center justify-between gap-2 mb-1.5 text-[11px] text-muted-foreground">
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <Clock className="h-3 w-3 shrink-0" />
+                            <span className="font-mono font-medium">{v.kickoffBrussels ?? "—"}</span>
+                            <span>·</span>
+                            <span className="truncate">{v.league ?? "—"}</span>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {v.isTopPick && (
+                              <Badge variant="outline" className="text-[9px] h-4 px-1 border-violet-400 text-violet-600 dark:text-violet-300 font-semibold">
+                                TOP
+                              </Badge>
+                            )}
+                            <Badge
+                              variant="outline"
+                              className={
+                                "text-[9px] h-4 px-1 font-semibold " +
+                                (isTrueValue
+                                  ? "border-emerald-400 text-emerald-600 dark:text-emerald-300"
+                                  : "border-amber-400 text-amber-600 dark:text-amber-300")
+                              }
+                            >
+                              {isTrueValue ? "VALUE" : "BEST"}
+                            </Badge>
+                          </div>
+                        </div>
+                        <div className="font-semibold text-xs mb-1.5 truncate">{v.match}</div>
+                        <PredictionRow
+                          p={{
+                            id: v.id,
+                            market: v.market,
+                            selection: v.selection,
+                            confidence: v.confidence,
+                            probability: v.probability ?? 0,
+                            fairOdds: v.bookOdds ?? 0,
+                            bookOdds: v.bookOdds,
+                            edge: v.edge,
+                            isTopPick: v.isTopPick === true,
+                            isValueBet: isTrueValue,
+                            isSafePick: v.isSafePick,
+                            isSafeHighOdds: v.isSafeHighOdds,
+                            consensusSources: v.consensusSources,
+                            sourcesJson: null,
+                            recommendedStake: v.recommendedStake,
+                            clv: v.clv,
+                          }}
+                          compact
+                        />
+                      </div>
+                    );
+                  })}
                   <p className="text-xs text-muted-foreground italic text-center pt-2">
-                    Showing top {statsQuery.data.valueBets.length} value bets by edge for {date}.
-                    Kelly stake = recommended % of bankroll (1/4 Kelly, capped at 5%).
+                    Showing the best value bet from each of the top {statsQuery.data.valueBets.length} predicted matches for {date}.
+                    {" "}
+                    <span className="text-emerald-600 dark:text-emerald-400 font-medium">VALUE</span> = clears the value-bet threshold (edge ≥ 2.5%, prob 40–82%);
+                    {" "}
+                    <span className="text-amber-600 dark:text-amber-400 font-medium">BEST</span> = best available (highest-edge pick when no market cleared the strict threshold).
                   </p>
                 </div>
               </>

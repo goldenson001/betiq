@@ -28,10 +28,52 @@ export async function GET(req: NextRequest) {
     .sort((a, b) => b.confidence - a.confidence)
     .slice(0, 5);
 
-  const valueBets = predictions
-    .filter((p) => p.isValueBet)
-    .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0))
-    .slice(0, 5);
+  // Value bets — ONE best value bet per match, so every predicted match is
+  // represented in the Value Bets tab. Falls back to the highest-edge pick
+  // per match when no prediction clears the strict value-bet threshold
+  // (edge ≥ 2.5%, prob in [0.40, 0.82]). This avoids the bug where the tab
+  // appeared empty even when matches were predicted.
+  const valueByMatch = new Map<string, (typeof predictions)[number]>();
+  const valueFallbackByMatch = new Map<string, (typeof predictions)[number]>();
+  const VALUE_COMPOSITE = new Set(["bet_builder", "correct_score", "htft"]);
+  for (const p of predictions) {
+    if (VALUE_COMPOSITE.has(p.market)) continue;
+    if (p.isValueBet) {
+      const existing = valueByMatch.get(p.matchId);
+      const a = p.edge ?? -Infinity;
+      const b = existing?.edge ?? -Infinity;
+      if (!existing || a > b) {
+        valueByMatch.set(p.matchId, p);
+      }
+    } else if (p.edge !== null && p.edge !== undefined) {
+      const existing = valueFallbackByMatch.get(p.matchId);
+      const a = p.edge ?? -Infinity;
+      const b = existing?.edge ?? -Infinity;
+      if (!existing || a > b) {
+        valueFallbackByMatch.set(p.matchId, p);
+      }
+    }
+  }
+  const allValueByMatch = new Map<string, (typeof predictions)[number]>();
+  const allValueMatchIds = new Set<string>([...valueByMatch.keys(), ...valueFallbackByMatch.keys()]);
+  for (const matchId of allValueMatchIds) {
+    const trueValue = valueByMatch.get(matchId);
+    const fallback = valueFallbackByMatch.get(matchId);
+    if (trueValue) {
+      allValueByMatch.set(matchId, trueValue);
+    } else if (fallback) {
+      allValueByMatch.set(matchId, fallback);
+    }
+  }
+
+  const valueBets = Array.from(allValueByMatch.values())
+    .sort((a, b) => {
+      const aVal = a.isValueBet ? 1 : 0;
+      const bVal = b.isValueBet ? 1 : 0;
+      if (aVal !== bVal) return bVal - aVal;
+      return (b.edge ?? 0) - (a.edge ?? 0);
+    })
+    .slice(0, 10);
 
   // Safe picks — ONE safest pick per match, so every predicted match is
   // represented in the Safe Picks tab. The top pick of a match is OFTEN the
@@ -113,7 +155,7 @@ export async function GET(req: NextRequest) {
       totalParlays: parlays.length,
       leaguesCovered: leagueCounts.size,
       topPicksCount: predictions.filter((p) => p.isTopPick).length,
-      valueBetsCount: predictions.filter((p) => p.isValueBet).length,
+      valueBetsCount: allValueByMatch.size,
       safePicksCount: allSafeByMatch.size,
       safeHighOddsCount: predictions.filter((p) => p.isSafeHighOdds).length,
     },
@@ -136,6 +178,8 @@ export async function GET(req: NextRequest) {
     valueBets: valueBets.map((p) => ({
       id: p.id,
       match: `${p.match.homeTeam} v ${p.match.awayTeam}`,
+      league: p.match.league?.name ?? null,
+      kickoffBrussels: p.match.kickoffBrussels ?? null,
       market: p.market,
       selection: p.selection,
       confidence: p.confidence,
@@ -144,6 +188,8 @@ export async function GET(req: NextRequest) {
       edge: p.edge,
       isSafePick: p.isSafePick,
       isSafeHighOdds: p.isSafeHighOdds,
+      isTopPick: p.isTopPick,
+      isValueBet: p.isValueBet,
       consensusSources: p.consensusSources,
       recommendedStake: p.recommendedStake,
       clv: p.clv,
