@@ -171,7 +171,11 @@ export default function Home() {
       const params = new URLSearchParams({ date });
       if (leagueFilter) params.set("league", leagueFilter);
       const r = await fetch(`/api/matches?${params}`);
-      if (!r.ok) throw new Error("Failed to load matches");
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        const msg = body?.error || body?.hint || `HTTP ${r.status}`;
+        throw new Error(msg);
+      }
       return r.json() as Promise<MatchesResponse>;
     },
     staleTime: 60_000,
@@ -181,7 +185,10 @@ export default function Home() {
     queryKey: ["stats", date],
     queryFn: async () => {
       const r = await fetch(`/api/stats?date=${date}`);
-      if (!r.ok) throw new Error("Failed to load stats");
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body?.error || `HTTP ${r.status}`);
+      }
       return r.json() as Promise<StatsResponse>;
     },
     staleTime: 60_000,
@@ -211,7 +218,11 @@ export default function Home() {
   const triggerPipeline = useMutation({
     mutationFn: async (phase: string) => {
       const r = await fetch(`/api/trigger?phase=${phase}&date=${date}`, { method: "GET" });
-      if (!r.ok) throw new Error("Pipeline trigger failed");
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        const msg = body?.error || body?.hint || `HTTP ${r.status}`;
+        throw new Error(msg);
+      }
       return r.json();
     },
     onSuccess: (_data, phase) => {
@@ -222,7 +233,7 @@ export default function Home() {
       queryClient.invalidateQueries({ queryKey: ["performance"] });
     },
     onError: (err: Error) => {
-      toast.error(`Pipeline failed: ${err.message}`);
+      toast.error(`Pipeline failed: ${err.message}`, { duration: 8000 });
     },
   });
 
@@ -419,8 +430,23 @@ export default function Home() {
               </div>
             ) : matchesQuery.isError ? (
               <Card>
-                <CardContent className="py-8 text-center text-sm text-muted-foreground">
-                  Failed to load matches. Click Refresh Data to retry.
+                <CardContent className="py-8 text-center text-sm text-muted-foreground space-y-2">
+                  <div>Failed to load matches.</div>
+                  <div className="text-xs text-destructive">
+                    {(matchesQuery.error as Error)?.message || "Unknown error"}
+                  </div>
+                  <div className="text-xs">
+                    Click <strong>Refresh Data</strong> to retry, or visit{" "}
+                    <a
+                      href="/api/diagnose"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline text-blue-600 dark:text-blue-400"
+                    >
+                      /api/diagnose
+                    </a>{" "}
+                    to inspect the database connection.
+                  </div>
                 </CardContent>
               </Card>
             ) : matches.length === 0 ? (

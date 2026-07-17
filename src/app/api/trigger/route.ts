@@ -16,8 +16,63 @@ import { buildAndPersistParlays } from "@/lib/confidence/engine";
 import { runFeedbackLoopForUnprocessedDates } from "@/lib/learning/feedback";
 import { brusselsDateString } from "@/lib/time/brussels";
 import { db } from "@/lib/db";
+import { PrismaClientInitializationError } from "@prisma/client/runtime/library";
 
 export const maxDuration = 300; // 5 min for pipeline runs
+export const dynamic = "force-dynamic";
+
+function friendlyError(err: unknown): { status: number; body: Record<string, unknown> } {
+  const msg = err instanceof Error ? err.message : String(err);
+  const stack = err instanceof Error ? err.stack : undefined;
+
+  // Database not reachable / not configured
+  if (
+    err instanceof PrismaClientInitializationError ||
+    msg.includes("connect") ||
+    msg.includes("DATABASE_URL") ||
+    msg.includes("Timed out fetching a connection")
+  ) {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        error: "Database connection failed.",
+        detail: msg,
+        hint:
+          "Set DATABASE_URL in Vercel → Project → Settings → Environment Variables. " +
+          "Use a PostgreSQL connection string (e.g. Neon, Supabase). SQLite is not supported on Vercel.",
+      },
+    };
+  }
+
+  // Schema not applied
+  if (
+    msg.includes("relation") ||
+    msg.includes("no such table") ||
+    msg.includes("does not exist") ||
+    msg.includes("P2021")
+  ) {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        error: "Database schema not applied.",
+        detail: msg,
+        hint:
+          "Run `npx prisma db push` against your DATABASE_URL from a local terminal, or use the prisma migrate CLI. The schema is in prisma/schema.prisma.",
+      },
+    };
+  }
+
+  return {
+    status: 500,
+    body: {
+      ok: false,
+      error: msg,
+      stack: process.env.NODE_ENV === "production" ? undefined : stack,
+    },
+  };
+}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -57,9 +112,7 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json({ ok: true, phase, date, result });
   } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
-      { status: 500 }
-    );
+    const { status, body } = friendlyError(err);
+    return NextResponse.json(body, { status });
   }
 }
