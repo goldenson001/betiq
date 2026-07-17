@@ -28,11 +28,12 @@ import {
   BarChart3,
   Loader2,
   Info,
+  Shield,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MatchCard, type MatchView } from "@/components/dashboard/match-card";
 import { MatchDetailDialog, type MatchDetailView } from "@/components/dashboard/match-detail";
-import { ParlayCard, type ParlayView } from "@/components/dashboard/parlay-card";
+import { ParlayCard, type ParlayView, parlayTypeOrder } from "@/components/dashboard/parlay-card";
 import {
   PerformanceDashboard,
   type SnapshotView,
@@ -105,6 +106,7 @@ interface StatsResponse {
     leaguesCovered: number;
     topPicksCount: number;
     valueBetsCount: number;
+    safePicksCount: number;
   };
   leagueCounts: Array<{ name: string; count: number }>;
   topPicks: Array<{
@@ -113,8 +115,11 @@ interface StatsResponse {
     market: string;
     selection: string;
     confidence: number;
+    probability?: number;
     bookOdds: number | null;
     edge: number | null;
+    isSafePick?: boolean;
+    consensusSources?: number;
     recommendedStake?: number | null;
     clv?: number | null;
   }>;
@@ -124,8 +129,24 @@ interface StatsResponse {
     market: string;
     selection: string;
     confidence: number;
+    probability?: number;
     bookOdds: number | null;
     edge: number | null;
+    isSafePick?: boolean;
+    consensusSources?: number;
+    recommendedStake?: number | null;
+    clv?: number | null;
+  }>;
+  safePicks?: Array<{
+    id: string;
+    match: string;
+    market: string;
+    selection: string;
+    confidence: number;
+    probability?: number;
+    bookOdds: number | null;
+    edge: number | null;
+    consensusSources?: number;
     recommendedStake?: number | null;
     clv?: number | null;
   }>;
@@ -187,6 +208,44 @@ export default function Home() {
     },
     staleTime: 60_000,
   });
+
+  // ── Auto-fetch tomorrow (or any future date) when navigating forward ───────
+  // When the user clicks the right arrow to view a future date that has no
+  // matches yet, automatically trigger the scrape→predict→parlay pipeline so
+  // matches become visible without manually clicking "Refresh Data".
+  const [autoFetching, setAutoFetching] = useState(false);
+  const todayStr = brusselsToday();
+  const isFutureOrToday = date >= todayStr;
+  const matchesEmpty =
+    !matchesQuery.isLoading &&
+    !matchesQuery.isError &&
+    matchesQuery.data &&
+    matchesQuery.data.totalMatches === 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function autoFetch() {
+      if (!isFutureOrToday || !matchesEmpty || autoFetching) return;
+      setAutoFetching(true);
+      try {
+        const r = await fetch(`/api/trigger?phase=all&date=${date}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        await r.json();
+        // Invalidate the matches query so the UI refreshes with new data
+        queryClient.invalidateQueries({ queryKey: ["matches", date] });
+        queryClient.invalidateQueries({ queryKey: ["stats", date] });
+        queryClient.invalidateQueries({ queryKey: ["parlays", date] });
+        toast.success(`Fetched matches for ${date}`);
+      } catch (err) {
+        toast.error(`Auto-fetch failed: ${(err as Error).message}`, { duration: 6000 });
+      } finally {
+        if (!cancelled) setAutoFetching(false);
+      }
+    }
+    autoFetch();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [date, isFutureOrToday, matchesEmpty]);
 
   const statsQuery = useQuery<StatsResponse>({
     queryKey: ["stats", date],
@@ -384,6 +443,12 @@ export default function Home() {
                 <Zap className="h-3 w-3" />
                 {totalPredictions} predictions
               </Badge>
+              {statsQuery.data && statsQuery.data.stats.safePicksCount > 0 && (
+                <Badge variant="secondary" className="gap-1 text-xs border-emerald-400 text-emerald-700 dark:text-emerald-300">
+                  <Shield className="h-3 w-3" />
+                  {statsQuery.data.stats.safePicksCount} safe
+                </Badge>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -397,6 +462,9 @@ export default function Home() {
               </TabsTrigger>
               <TabsTrigger value="parlays" className="gap-1.5 text-xs sm:text-sm">
                 <Trophy className="h-3.5 w-3.5" /> Parlays
+              </TabsTrigger>
+              <TabsTrigger value="safe" className="gap-1.5 text-xs sm:text-sm">
+                <Shield className="h-3.5 w-3.5" /> Safe Picks
               </TabsTrigger>
               <TabsTrigger value="value" className="gap-1.5 text-xs sm:text-sm">
                 <Target className="h-3.5 w-3.5" /> Value Bets
@@ -460,10 +528,22 @@ export default function Home() {
               <Card>
                 <CardContent className="py-12 text-center">
                   <Trophy className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
-                  <p className="text-sm font-medium">No matches found for {date}</p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Click <strong>Refresh Data</strong> to trigger the scrape → predict → parlay pipeline.
+                  <p className="text-sm font-medium">
+                    {autoFetching
+                      ? `Fetching matches for ${date}...`
+                      : `No matches found for ${date}`}
                   </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {autoFetching
+                      ? "Pulling fixtures from ESPN, generating predictions, and building parlays. This takes 10–30 seconds."
+                      : "Click Refresh Data to trigger the scrape → predict → parlay pipeline."}
+                  </p>
+                  {autoFetching && (
+                    <div className="mt-3 flex items-center justify-center gap-2 text-xs text-primary">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Running pipeline...</span>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             ) : (
@@ -500,7 +580,7 @@ export default function Home() {
           <TabsContent value="parlays" className="space-y-4 mt-4">
             {parlaysQuery.isLoading ? (
               <div className="grid sm:grid-cols-2 gap-4">
-                {Array.from({ length: 3 }).map((_, i) => (
+                {Array.from({ length: 4 }).map((_, i) => (
                   <Skeleton key={i} className="h-64 rounded-lg" />
                 ))}
               </div>
@@ -523,11 +603,73 @@ export default function Home() {
             ) : (
               <div className="grid sm:grid-cols-2 gap-4">
                 {parlaysQuery.data.parlays
-                  .filter((p) => p.type !== "value" || p.legs.length > 0)
+                  .slice()
+                  .sort((a, b) => parlayTypeOrder(a.type) - parlayTypeOrder(b.type))
                   .map((p) => (
                     <ParlayCard key={p.id} parlay={p} />
                   ))}
               </div>
+            )}
+          </TabsContent>
+
+          {/* Safe picks tab — the lowest-risk pick from each market */}
+          <TabsContent value="safe" className="space-y-3 mt-4">
+            {statsQuery.isLoading ? (
+              <div className="space-y-2">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <Skeleton key={i} className="h-16 rounded-md" />
+                ))}
+              </div>
+            ) : statsQuery.isError || !statsQuery.data || !statsQuery.data.safePicks || statsQuery.data.safePicks.length === 0 ? (
+              <Card>
+                <CardContent className="py-12 text-center">
+                  <Shield className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
+                  <p className="text-sm font-medium">No safe picks available for {date}</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Safe picks are the lower-risk side of each market (probability ≥ 55% for binary markets, ≥ 50% for 1X2).
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold flex items-center gap-2">
+                    <Shield className="h-4 w-4 text-emerald-500" />
+                    Top Safe Picks
+                  </h3>
+                  <Badge variant="secondary" className="text-xs">
+                    {statsQuery.data.stats.safePicksCount} total
+                  </Badge>
+                </div>
+                <div className="space-y-1.5">
+                  {statsQuery.data.safePicks.map((v) => (
+                    <PredictionRow
+                      key={v.id}
+                      p={{
+                        id: v.id,
+                        market: v.market,
+                        selection: v.selection,
+                        confidence: v.confidence,
+                        probability: v.probability ?? 0,
+                        fairOdds: v.bookOdds ?? 0,
+                        bookOdds: v.bookOdds,
+                        edge: v.edge,
+                        isTopPick: false,
+                        isValueBet: false,
+                        isSafePick: true,
+                        consensusSources: v.consensusSources,
+                        sourcesJson: null,
+                        recommendedStake: v.recommendedStake,
+                        clv: v.clv,
+                      }}
+                    />
+                  ))}
+                  <p className="text-xs text-muted-foreground italic text-center pt-2">
+                    Showing top {statsQuery.data.safePicks.length} safe picks by probability for {date}.
+                    Safe = lower-risk side of each market. Use these for low-variance bankroll growth.
+                  </p>
+                </div>
+              </>
             )}
           </TabsContent>
 
@@ -569,12 +711,14 @@ export default function Home() {
                         market: v.market,
                         selection: v.selection,
                         confidence: v.confidence,
-                        probability: 0,
+                        probability: v.probability ?? 0,
                         fairOdds: v.bookOdds ?? 0,
                         bookOdds: v.bookOdds,
                         edge: v.edge,
                         isTopPick: false,
                         isValueBet: true,
+                        isSafePick: v.isSafePick,
+                        consensusSources: v.consensusSources,
                         sourcesJson: null,
                         recommendedStake: v.recommendedStake,
                         clv: v.clv,

@@ -2,7 +2,7 @@
  * Run the full pipeline for today (Brussels timezone):
  *   1. Scrape ESPN fixtures + attach prediction-site consensus
  *   2. Aggregate raw predictions into compound market predictions
- *   3. Build & persist parlays (best / safe / value)
+ *   3. Build & persist parlays (safest / medium_risk / high_risk / mega_odds)
  *
  * Usage:
  *   npx tsx scripts/run_pipeline.ts            # today (Brussels)
@@ -35,10 +35,13 @@ async function main() {
     `[pipeline] Generated ${p.predictions} compound predictions across ${p.matches} matches`
   );
 
-  console.log(`[pipeline] Phase 4: building parlays (best / safe / value)...`);
+  console.log(`[pipeline] Phase 4: building parlays (safest / medium / high / mega)...`);
   const par = await buildAndPersistParlays(today);
   console.log(
-    `[pipeline] Parlays -> best: ${par.bestParlay?.legs.length ?? 0} legs / safe: ${par.safeParlay?.legs.length ?? 0} legs / value: ${par.valueBets.length} legs`
+    `[pipeline] Parlays -> safest: ${par.safest?.legs.length ?? 0} legs / ` +
+    `medium: ${par.mediumRisk?.legs.length ?? 0} legs / ` +
+    `high: ${par.highRisk?.legs.length ?? 0} legs / ` +
+    `mega: ${par.megaOdds?.legs.length ?? 0} legs`
   );
 
   console.log(`[pipeline] Done.`);

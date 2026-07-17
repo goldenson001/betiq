@@ -255,6 +255,8 @@ async function backtestSingleDate(dateStr: string): Promise<BacktestDayResult> {
       matchId: match.id,
       homeTeam: match.homeTeam,
       awayTeam: match.awayTeam,
+      homeForm: match.homeForm,
+      awayForm: match.awayForm,
       rawPredictions: match.rawPredictions.map((rp) => ({
         sourceId: rp.sourceId,
         sourceName: rp.source.name,

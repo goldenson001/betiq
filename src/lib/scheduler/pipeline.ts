@@ -21,7 +21,12 @@ export interface PipelineResult {
   feedback: { datesProcessed: string[] };
   scrape: { matchesStored: number; predictionsStored: number };
   predictions: { matches: number; predictions: number };
-  parlays: { bestParlay: unknown; safeParlay: unknown; valueBets: unknown[] };
+  parlays: {
+    safest: unknown | null;
+    mediumRisk: unknown | null;
+    highRisk: unknown | null;
+    megaOdds: unknown | null;
+  };
   startedAt: Date;
   finishedAt: Date;
   error?: string;
@@ -59,7 +64,7 @@ export async function runDailyPipeline(targetDate?: string): Promise<PipelineRes
       feedback: { datesProcessed: [] },
       scrape: { matchesStored: 0, predictionsStored: 0 },
       predictions: { matches: 0, predictions: 0 },
-      parlays: { bestParlay: null, safeParlay: null, valueBets: [] },
+      parlays: { safest: null, mediumRisk: null, highRisk: null, megaOdds: null },
       startedAt,
       finishedAt: new Date(),
       error: err instanceof Error ? err.message : String(err),

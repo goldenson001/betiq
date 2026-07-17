@@ -67,6 +67,21 @@ export interface EnginePrediction {
   edge?: number;
   isTopPick: boolean;
   isValueBet: boolean;
+  /**
+   * Safer-pick flag — set on the selection within each market that has the
+   * highest probability (i.e. the lowest-risk side of that market). For
+   * binary markets (BTTS, O/U, corners O/U, cards O/U) this is whichever
+   * side has probability >= 0.55; for 1X2 it's the highest-probability
+   * outcome (probability >= 0.50). Filled in by the post-process pass in
+   * buildPredictionsForMatch; individual gen* functions may omit it.
+   */
+  isSafePick?: boolean;
+  /**
+   * Consensus strength — number of distinct sources that agree on this pick.
+   * 0 when only the engine inferred the pick (no source coverage). Filled in
+   * by the post-process pass; individual gen* functions may omit it.
+   */
+  consensusSources?: number;
   sources: { source: string; pick: string; weight: number }[];
 }
 

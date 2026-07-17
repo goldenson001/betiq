@@ -121,6 +121,8 @@ model Prediction {
   edge        Float?
   isTopPick   Boolean  @default(false)
   isValueBet  Boolean  @default(false)
+  isSafePick      Boolean  @default(false)
+  consensusSources Int     @default(0)
   kellyFraction   Float?
   recommendedStake Float?
   clv             Float?
@@ -133,6 +135,7 @@ model Prediction {
   @@index([confidence])
   @@index([isValueBet])
   @@index([isTopPick])
+  @@index([isSafePick])
 }
 
 model Parlay {

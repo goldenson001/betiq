@@ -1,11 +1,25 @@
 /**
  * Confidence Engine
  * ──────────────────
- * Takes the engine's per-match predictions and:
- *   1. Surfaces the best daily parlay (accumulator)
- *   2. Surfaces best value bets (positive edge, reasonable probability)
- *   3. Surfaces a "safe" parlay (high-probability legs)
- *   4. Persists parlays to DB
+ * Takes the engine's per-match predictions and builds FOUR daily parlay tiers
+ * calibrated for different risk appetites:
+ *
+ *   1. safest      — 2-3 legs, each leg probability >= 0.75. Target: ~70-85%
+ *                    combined win probability. For investors who want high
+ *                    win-rate, low-variance returns.
+ *   2. medium_risk — 3-4 legs, each leg probability >= 0.55. Target: ~25-50%
+ *                    combined win probability. Balanced growth.
+ *   3. high_risk   — 4-5 legs, each leg probability >= 0.40. Target: ~5-20%
+ *                    combined win probability. Higher upside, higher variance.
+ *   4. mega_odds   — 5-6 legs targeting combined odds >= 20/1. Each leg
+ *                    probability >= 0.15. Longshot parlay for lottery-style
+ *                    payouts.
+ *
+ * Each parlay also gets a Kelly criterion stake (1/8 fraction, capped at 2%
+ * of bankroll — parlays are much higher variance than single bets).
+ *
+ * Persists all four parlays to DB. Idempotent: clears existing parlays for
+ * the date before re-creating.
  */
 
 import { db } from "@/lib/db";
@@ -43,31 +57,40 @@ function evaluateParlay(legs: ParlayLeg[]): ParlayCandidate {
 }
 
 /**
- * Builds the best daily parlay using a greedy algorithm:
- * Start with the highest-confidence top pick, add legs that maximize EV
- * while keeping combined probability above a floor (0.04 = ~25/1 max odds).
+ * Generic greedy parlay builder. Starts with the highest-quality leg and
+ * adds legs that maximize expected value while keeping each leg's probability
+ * above `minLegProb` AND keeping combined probability above `minCombinedProb`.
+ *
+ * Excludes combo / synthetic markets (bet_builder, win_btts, correct_score)
+ * since these overlap with base markets and would double-count signal.
  */
-function buildBestParlay(allLegs: ParlayLeg[], maxLegs: number = 5): ParlayCandidate {
-  // Sort by confidence * probability (we want strong picks, not longshots)
-  const sorted = [...allLegs].sort(
-    (a, b) => b.probability * b.confidence - a.probability * a.confidence
-  );
-  if (sorted.length === 0) {
+function buildGreedyParlay(
+  allLegs: ParlayLeg[],
+  opts: {
+    maxLegs: number;
+    minLegProb: number;
+    minCombinedProb: number;
+  }
+): ParlayCandidate {
+  const EXCLUDED = new Set(["bet_builder", "win_btts", "correct_score", "htft"]);
+  const eligible = allLegs
+    .filter((l) => !EXCLUDED.has(l.market))
+    .filter((l) => l.probability >= opts.minLegProb)
+    .sort((a, b) => b.probability * b.confidence - a.probability * a.confidence);
+  if (eligible.length === 0) {
     return evaluateParlay([]);
   }
-
-  // Start with top 1
-  const legs: ParlayLeg[] = [sorted[0]];
-  const used = new Set<string>([sorted[0].matchId]);
-
-  while (legs.length < maxLegs) {
+  const legs: ParlayLeg[] = [eligible[0]];
+  const used = new Set<string>([eligible[0].matchId]);
+  while (legs.length < opts.maxLegs) {
     let bestGain = -Infinity;
     let bestLeg: ParlayLeg | null = null;
-    for (const leg of sorted) {
+    for (const leg of eligible) {
       if (used.has(leg.matchId)) continue;
       const trial = [...legs, leg];
       const cand = evaluateParlay(trial);
-      if (cand.combinedProbability < 0.04) continue;
+      if (cand.combinedProbability < opts.minCombinedProb) continue;
+      // Greedy on expected value — but penalize tiny probability legs
       const gain = cand.expectedValue;
       if (gain > bestGain) {
         bestGain = gain;
@@ -78,50 +101,61 @@ function buildBestParlay(allLegs: ParlayLeg[], maxLegs: number = 5): ParlayCandi
     legs.push(bestLeg);
     used.add(bestLeg.matchId);
   }
-
   return evaluateParlay(legs);
 }
 
 /**
- * Builds a "safe" parlay: legs with probability >= 0.7 only, capped at 4 legs.
+ * Mega-odds builder — targets combined odds >= 20/1 by including lower-probability
+ * legs. Inverted greedy: prefer legs with probability in [0.15, 0.40] (longshots
+ * but not pure luck), then keep adding until combined odds >= 20 OR maxLegs reached.
  */
-function buildSafeParlay(allLegs: ParlayLeg[]): ParlayCandidate {
-  const safeLegs = allLegs
-    .filter((l) => l.probability >= 0.7)
-    .sort((a, b) => b.probability - a.probability)
-    .slice(0, 4);
-  // Dedupe by match
-  const seen = new Set<string>();
-  const deduped = safeLegs.filter((l) => {
-    if (seen.has(l.matchId)) return false;
-    seen.add(l.matchId);
-    return true;
-  });
-  return evaluateParlay(deduped);
+function buildMegaOddsParlay(allLegs: ParlayLeg[]): ParlayCandidate {
+  const EXCLUDED = new Set(["bet_builder", "win_btts", "correct_score", "htft"]);
+  const eligible = allLegs
+    .filter((l) => !EXCLUDED.has(l.market))
+    .filter((l) => l.probability >= 0.15 && l.probability <= 0.50)
+    .sort((a, b) => b.odds - a.odds); // highest odds first
+  if (eligible.length === 0) {
+    return evaluateParlay([]);
+  }
+  const legs: ParlayLeg[] = [];
+  const used = new Set<string>();
+  const TARGET_ODDS = 20.0;
+  const MAX_LEGS = 6;
+  for (const leg of eligible) {
+    if (legs.length >= MAX_LEGS) break;
+    if (used.has(leg.matchId)) continue;
+    legs.push(leg);
+    used.add(leg.matchId);
+    const cand = evaluateParlay(legs);
+    if (cand.combinedOdds >= TARGET_ODDS) break;
+  }
+  // If we couldn't hit the target with longshots, fall back to adding a
+  // mid-probability leg to push the odds up
+  if (legs.length < MAX_LEGS && evaluateParlay(legs).combinedOdds < TARGET_ODDS) {
+    const mid = allLegs
+      .filter((l) => !EXCLUDED.has(l.market))
+      .filter((l) => l.probability >= 0.30 && l.probability <= 0.55)
+      .filter((l) => !used.has(l.matchId))
+      .sort((a, b) => b.odds - a.odds);
+    for (const leg of mid) {
+      if (legs.length >= MAX_LEGS) break;
+      legs.push(leg);
+      used.add(leg.matchId);
+      if (evaluateParlay(legs).combinedOdds >= TARGET_ODDS) break;
+    }
+  }
+  return evaluateParlay(legs);
 }
 
 /**
- * Finds the top N value bets — highest positive edge with prob in [0.35, 0.80].
- */
-function findValueBets(allLegs: ParlayLeg[], topN: number = 10): ParlayLeg[] {
-  return allLegs
-    .filter((l) => l.odds * l.probability - 1 > 0.02)
-    .filter((l) => l.probability >= 0.3 && l.probability <= 0.85)
-    .sort((a, b) => {
-      const evA = a.odds * a.probability - 1;
-      const evB = b.odds * b.probability - 1;
-      return evB - evA;
-    })
-    .slice(0, topN);
-}
-
-/**
- * Main entry — builds and persists all parlay types for a date.
+ * Main entry — builds and persists all four parlay tiers for a date.
  */
 export async function buildAndPersistParlays(dateStr: string): Promise<{
-  bestParlay: ParlayCandidate | null;
-  safeParlay: ParlayCandidate | null;
-  valueBets: ParlayLeg[];
+  safest: ParlayCandidate | null;
+  mediumRisk: ParlayCandidate | null;
+  highRisk: ParlayCandidate | null;
+  megaOdds: ParlayCandidate | null;
 }> {
   // Load all predictions for date
   const matches = await db.match.findMany({
@@ -150,82 +184,60 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   }
 
   if (allLegs.length === 0) {
-    return { bestParlay: null, safeParlay: null, valueBets: [] };
+    return { safest: null, mediumRisk: null, highRisk: null, megaOdds: null };
   }
 
-  const bestParlay = buildBestParlay(allLegs, 5);
-  const safeParlay = buildSafeParlay(allLegs);
-  const valueBets = findValueBets(allLegs, 10);
+  const safest = buildGreedyParlay(allLegs, { maxLegs: 3, minLegProb: 0.75, minCombinedProb: 0.35 });
+  const mediumRisk = buildGreedyParlay(allLegs, { maxLegs: 4, minLegProb: 0.55, minCombinedProb: 0.08 });
+  const highRisk = buildGreedyParlay(allLegs, { maxLegs: 5, minLegProb: 0.40, minCombinedProb: 0.015 });
+  const megaOdds = buildMegaOddsParlay(allLegs);
 
-  // Clear existing parlays for this date
+  // Clear existing parlays for this date (covers old "daily_best"/"safe"/"value" types too)
   await db.parlay.deleteMany({ where: { matchDate: dateStr } });
 
-  // Compute Kelly stake for each parlay type — fractional Kelly (1/8) with
-  // tighter caps because parlay variance is much higher than single bets.
-  const bestKelly: KellyResult = bestParlay.legs.length > 0
-    ? kellyParlayStake(bestParlay.combinedProbability, bestParlay.combinedOdds, bestParlay.legs.length)
+  // Compute Kelly stake for each parlay — fractional Kelly (1/8) with tighter
+  // caps because parlay variance is much higher than single bets.
+  const safeKelly: KellyResult = safest.legs.length > 0
+    ? kellyParlayStake(safest.combinedProbability, safest.combinedOdds, safest.legs.length)
     : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
-  const safeKelly: KellyResult = safeParlay.legs.length > 0
-    ? kellyParlayStake(safeParlay.combinedProbability, safeParlay.combinedOdds, safeParlay.legs.length)
+  const mediumKelly: KellyResult = mediumRisk.legs.length > 0
+    ? kellyParlayStake(mediumRisk.combinedProbability, mediumRisk.combinedOdds, mediumRisk.legs.length)
     : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
-  const valueParlayEval = valueBets.length > 0 ? evaluateParlay(valueBets.slice(0, 3)) : null;
-  const valueKelly: KellyResult = valueParlayEval && valueParlayEval.legs.length > 0
-    ? kellyParlayStake(valueParlayEval.combinedProbability, valueParlayEval.combinedOdds, valueParlayEval.legs.length)
+  const highKelly: KellyResult = highRisk.legs.length > 0
+    ? kellyParlayStake(highRisk.combinedProbability, highRisk.combinedOdds, highRisk.legs.length)
+    : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
+  const megaKelly: KellyResult = megaOdds.legs.length > 0
+    ? kellyParlayStake(megaOdds.combinedProbability, megaOdds.combinedOdds, megaOdds.legs.length)
     : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
 
-  // Persist best parlay
-  if (bestParlay.legs.length > 0) {
+  const tiers: Array<{
+    type: string;
+    cand: ParlayCandidate;
+    k: KellyResult;
+  }> = [
+    { type: "safest", cand: safest, k: safeKelly },
+    { type: "medium_risk", cand: mediumRisk, k: mediumKelly },
+    { type: "high_risk", cand: highRisk, k: highKelly },
+    { type: "mega_odds", cand: megaOdds, k: megaKelly },
+  ];
+
+  for (const tier of tiers) {
+    if (tier.cand.legs.length === 0) continue;
     await db.parlay.create({
       data: {
         matchDate: dateStr,
-        type: "daily_best",
-        legsJson: JSON.stringify(bestParlay.legs),
-        legsCount: bestParlay.legs.length,
-        combinedProbability: bestParlay.combinedProbability,
-        combinedOdds: bestParlay.combinedOdds,
-        confidence: bestParlay.confidence,
-        expectedValue: bestParlay.expectedValue,
-        kellyFraction: bestKelly.fullKelly,
-        recommendedStake: bestKelly.recommendedStake,
+        type: tier.type,
+        legsJson: JSON.stringify(tier.cand.legs),
+        legsCount: tier.cand.legs.length,
+        combinedProbability: tier.cand.combinedProbability,
+        combinedOdds: tier.cand.combinedOdds,
+        confidence: tier.cand.confidence,
+        expectedValue: tier.cand.expectedValue,
+        kellyFraction: tier.k.fullKelly,
+        recommendedStake: tier.k.recommendedStake,
       },
     });
   }
 
-  // Persist safe parlay
-  if (safeParlay.legs.length > 0) {
-    await db.parlay.create({
-      data: {
-        matchDate: dateStr,
-        type: "safe",
-        legsJson: JSON.stringify(safeParlay.legs),
-        legsCount: safeParlay.legs.length,
-        combinedProbability: safeParlay.combinedProbability,
-        combinedOdds: safeParlay.combinedOdds,
-        confidence: safeParlay.confidence,
-        expectedValue: safeParlay.expectedValue,
-        kellyFraction: safeKelly.fullKelly,
-        recommendedStake: safeKelly.recommendedStake,
-      },
-    });
-  }
-
-  // Persist value-bet parlay (top 3 value bets)
-  if (valueBets.length > 0 && valueParlayEval) {
-    await db.parlay.create({
-      data: {
-        matchDate: dateStr,
-        type: "value",
-        legsJson: JSON.stringify(valueBets),
-        legsCount: valueBets.length,
-        combinedProbability: valueParlayEval.combinedProbability,
-        combinedOdds: valueParlayEval.combinedOdds,
-        confidence: valueParlayEval.confidence,
-        expectedValue: valueParlayEval.expectedValue,
-        kellyFraction: valueKelly.fullKelly,
-        recommendedStake: valueKelly.recommendedStake,
-      },
-    });
-  }
-
-  return { bestParlay, safeParlay, valueBets };
+  return { safest, mediumRisk, highRisk, megaOdds };
 }

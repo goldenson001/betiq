@@ -14,6 +14,10 @@ export interface PredictionView {
   edge: number | null;
   isTopPick: boolean;
   isValueBet: boolean;
+  /** True when this is the lower-risk side of its market (prob >= 0.55 binary / >= 0.50 1X2). */
+  isSafePick?: boolean;
+  /** Number of distinct sources agreeing on this pick. */
+  consensusSources?: number;
   sourcesJson: string | null;
   /** Kelly criterion recommended stake (fraction of bankroll, 0-0.05). Null if not computed. */
   recommendedStake?: number | null;
@@ -27,15 +31,18 @@ export interface PredictionView {
 export function PredictionRow({ p, compact = false }: { p: PredictionView; compact?: boolean }) {
   const isValue = p.isValueBet;
   const isTop = p.isTopPick;
+  const isSafe = p.isSafePick === true;
   const hasKelly = p.recommendedStake !== undefined && p.recommendedStake !== null && p.recommendedStake > 0;
   const hasClv = p.clv !== undefined && p.clv !== null;
+  const consensus = p.consensusSources ?? 0;
   return (
     <div
       className={cn(
         "flex items-center gap-2 px-2.5 rounded-md border border-border/50 transition-colors hover:bg-accent/30",
         compact ? "py-1.5" : "py-2",
         isTop && "bg-primary/5 border-primary/40",
-        isValue && "ring-1 ring-amber-400/40"
+        isValue && "ring-1 ring-amber-400/40",
+        isSafe && !isTop && "bg-emerald-500/5 border-emerald-500/30"
       )}
     >
       <div className="flex-1 min-w-0">
@@ -48,9 +55,19 @@ export function PredictionRow({ p, compact = false }: { p: PredictionView; compa
               Top
             </span>
           )}
+          {isSafe && (
+            <span className="text-[9px] font-bold uppercase tracking-wider text-emerald-950 bg-emerald-400 px-1 py-0.5 rounded">
+              SAFE
+            </span>
+          )}
           {isValue && (
             <span className="text-[9px] font-bold uppercase tracking-wider text-amber-950 bg-amber-400 px-1 py-0.5 rounded">
               VALUE
+            </span>
+          )}
+          {consensus >= 3 && (
+            <span className="text-[9px] font-bold uppercase tracking-wider text-purple-950 bg-purple-300 px-1 py-0.5 rounded">
+              {consensus}× CONSENSUS
             </span>
           )}
           {hasKelly && (

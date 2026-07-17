@@ -2,7 +2,7 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { TrendingUp, Shield, Target, Trophy } from "lucide-react";
+import { TrendingUp, Shield, Flame, Trophy, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatKelly } from "@/lib/dashboard/format";
 
@@ -20,7 +20,8 @@ export interface ParlayLeg {
 export interface ParlayView {
   id: string;
   matchDate: string;
-  type: string; // daily_best | safe | value
+  /** One of: safest | medium_risk | high_risk | mega_odds (legacy: daily_best | safe | value) */
+  type: string;
   legs: ParlayLeg[];
   legsCount: number;
   combinedProbability: number;
@@ -35,21 +36,77 @@ export interface ParlayView {
   kellyFraction?: number | null;
 }
 
-const TYPE_META: Record<string, { label: string; icon: typeof Trophy; color: string }> = {
-  daily_best: { label: "Daily Best Parlay", icon: Trophy, color: "text-amber-500" },
-  safe: { label: "Safe Accumulator", icon: Shield, color: "text-emerald-500" },
-  value: { label: "Value Bet Parlay", icon: Target, color: "text-blue-500" },
+const TYPE_META: Record<
+  string,
+  { label: string; icon: typeof Trophy; color: string; border: string; blurb: string }
+> = {
+  safest: {
+    label: "Safest Bet",
+    icon: Shield,
+    color: "text-emerald-500",
+    border: "border-l-emerald-500",
+    blurb: "2–3 legs · each leg ≥ 75% prob · low-variance high-win-rate",
+  },
+  medium_risk: {
+    label: "Medium Risk",
+    icon: TrendingUp,
+    color: "text-blue-500",
+    border: "border-l-blue-500",
+    blurb: "3–4 legs · each leg ≥ 55% prob · balanced growth",
+  },
+  high_risk: {
+    label: "High Risk",
+    icon: Flame,
+    color: "text-amber-500",
+    border: "border-l-amber-500",
+    blurb: "4–5 legs · each leg ≥ 40% prob · higher upside, higher variance",
+  },
+  mega_odds: {
+    label: "Mega Odds",
+    icon: Sparkles,
+    color: "text-fuchsia-500",
+    border: "border-l-fuchsia-500",
+    blurb: "5–6 legs · target combined odds ≥ 20/1 · lottery-style payout",
+  },
+  // Legacy types (kept for back-compat with old DB rows)
+  daily_best: {
+    label: "Daily Best Parlay",
+    icon: Trophy,
+    color: "text-amber-500",
+    border: "border-l-primary",
+    blurb: "Top EV-driven parlay",
+  },
+  safe: {
+    label: "Safe Accumulator",
+    icon: Shield,
+    color: "text-emerald-500",
+    border: "border-l-emerald-500",
+    blurb: "High-probability legs",
+  },
+  value: {
+    label: "Value Bet Parlay",
+    icon: TrendingUp,
+    color: "text-blue-500",
+    border: "border-l-amber-400",
+    blurb: "Positive-edge picks",
+  },
 };
+
+const TYPE_ORDER = ["safest", "medium_risk", "high_risk", "mega_odds", "daily_best", "safe", "value"];
+
+export function parlayTypeOrder(type: string): number {
+  const i = TYPE_ORDER.indexOf(type);
+  return i === -1 ? 99 : i;
+}
 
 export function ParlayCard({ parlay }: { parlay: ParlayView }) {
   const meta = TYPE_META[parlay.type] ?? TYPE_META.daily_best;
   const Icon = meta.icon;
   const ev = parlay.expectedValue;
-  const isValue = parlay.type === "value";
   const hasKelly = parlay.recommendedStake !== null && parlay.recommendedStake !== undefined && parlay.recommendedStake > 0;
 
   return (
-    <Card className={cn("overflow-hidden border-l-4", isValue ? "border-l-amber-400" : "border-l-primary")}>
+    <Card className={cn("overflow-hidden border-l-4", meta.border)}>
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -60,6 +117,7 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
                 {parlay.legsCount} {parlay.legsCount === 1 ? "leg" : "legs"} ·{" "}
                 <span className="font-mono">Combined odds: {parlay.combinedOdds.toFixed(2)}</span>
               </p>
+              <p className="text-[10px] text-muted-foreground italic mt-0.5">{meta.blurb}</p>
             </div>
           </div>
           {parlay.evaluated && (
@@ -70,7 +128,7 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-2">
-        {parlay.legs.slice(0, isValue ? 10 : 5).map((leg, i) => (
+        {parlay.legs.slice(0, 6).map((leg, i) => (
           <div
             key={leg.predictionId}
             className="flex items-center gap-3 py-2 px-3 rounded-md bg-muted/40 text-sm"
@@ -91,9 +149,9 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
             </div>
           </div>
         ))}
-        {parlay.legs.length > (isValue ? 10 : 5) && (
+        {parlay.legs.length > 6 && (
           <div className="text-xs text-center text-muted-foreground py-1">
-            +{parlay.legs.length - (isValue ? 10 : 5)} more legs
+            +{parlay.legs.length - 6} more legs
           </div>
         )}
 
@@ -128,7 +186,7 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
                 Kelly Stake
               </span>
               <span className="text-[10px] text-muted-foreground">
-                1/4 Kelly · capped at 2% bankroll
+                1/8 Kelly · capped at 2% bankroll
               </span>
             </div>
             <div className="text-sm font-mono font-bold text-blue-700 dark:text-blue-300">

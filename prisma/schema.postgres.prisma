@@ -129,6 +129,10 @@ model Prediction {
   edge        Float?
   isTopPick   Boolean  @default(false)
   isValueBet  Boolean  @default(false)
+  // ── Safer-pick flag — true when this is the lower-risk side of its market ──
+  isSafePick      Boolean  @default(false)
+  // ── Consensus strength — number of distinct sources agreeing on this pick ──
+  consensusSources Int     @default(0)
   // ── Kelly criterion staking ──────────────────────────────────────────────
   // kellyFraction:   full Kelly stake (0-1) — fraction of bankroll
   // recommendedStake: fractional Kelly (default 1/4) clamped to [0, 0.05]
@@ -146,6 +150,7 @@ model Prediction {
   @@index([confidence])
   @@index([isValueBet])
   @@index([isTopPick])
+  @@index([isSafePick])
 }
 
 model Parlay {
