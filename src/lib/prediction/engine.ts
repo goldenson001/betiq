@@ -10,6 +10,8 @@
 import { db } from "@/lib/db";
 import type { EnginePrediction, EngineMatchPrediction } from "@/lib/types";
 import type { RawSourcePrediction } from "@/lib/types";
+import { applyPlatt } from "@/lib/learning/calibration";
+import { kelly as kellyStake, kellyParlay as kellyParlayStake } from "@/lib/learning/kelly";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Weighted aggregation helpers
@@ -22,6 +24,9 @@ interface SourcePick {
   pick: string;
   probabilities?: { home?: number; draw?: number; away?: number };
   odds?: { home?: number; draw?: number; away?: number; over25?: number; under25?: number };
+  /** Platt calibration params (a, b) for this source — identity if unavailable. */
+  calibrationA?: number;
+  calibrationB?: number;
 }
 
 /**
@@ -135,8 +140,13 @@ interface MatchContext {
     sourceName: string;
     weight: number;
     prediction: RawSourcePrediction;
+    /** Platt calibration params — identity (a=1, b=0) if not yet fitted. */
+    calibrationA?: number;
+    calibrationB?: number;
   }>;
 }
+
+export type { MatchContext };
 
 function gen1X2(ctx: MatchContext): EnginePrediction {
   const picks: SourcePick[] = ctx.rawPredictions
@@ -148,10 +158,12 @@ function gen1X2(ctx: MatchContext): EnginePrediction {
       pick: r.prediction["1x2"] as string,
       probabilities: r.prediction.probabilities,
       odds: r.prediction.odds,
+      calibrationA: r.calibrationA,
+      calibrationB: r.calibrationB,
     }));
   // If sources also expose probabilities, blend with mode
   let probBlend = weightedMode(picks).probability;
-  // Augment with average probabilities
+  // Augment with average probabilities (Platt-calibrated per source)
   const probSources = ctx.rawPredictions.filter((r) => r.prediction.probabilities);
   if (probSources.length > 0) {
     let sumW = 0;
@@ -159,16 +171,24 @@ function gen1X2(ctx: MatchContext): EnginePrediction {
     for (const r of probSources) {
       const pr = r.prediction.probabilities!;
       const w = r.weight;
-      pHome += (pr.home ?? 0) * w;
-      pDraw += (pr.draw ?? 0) * w;
-      pAway += (pr.away ?? 0) * w;
+      // Apply Platt calibration to each source's stated probability — this
+      // corrects for systematic over/underconfidence. Identity (a=1, b=0)
+      // when params haven't been fitted yet.
+      const a = r.calibrationA ?? 1;
+      const b = r.calibrationB ?? 0;
+      pHome += applyPlatt(pr.home ?? 0.33, a, b) * w;
+      pDraw += applyPlatt(pr.draw ?? 0.33, a, b) * w;
+      pAway += applyPlatt(pr.away ?? 0.33, a, b) * w;
       sumW += w;
     }
     if (sumW > 0) {
       pHome /= sumW; pDraw /= sumW; pAway /= sumW;
+      // Re-normalize (Platt can push the three probs off-sum slightly)
+      const sumP = pHome + pDraw + pAway;
+      if (sumP > 0) { pHome /= sumP; pDraw /= sumP; pAway /= sumP; }
       const mode = weightedMode(picks);
       const probFromProbs = mode.selection === "1" ? pHome : mode.selection === "2" ? pAway : pDraw;
-      // Blend 60% mode weight, 40% explicit probability
+      // Blend 60% mode weight, 40% explicit (calibrated) probability
       probBlend = 0.6 * probBlend + 0.4 * probFromProbs;
     }
   }
@@ -730,6 +750,13 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
 
 /**
  * Loads all matches for a date, builds predictions for each, persists to DB.
+ *
+ * Per-source Platt calibration params are loaded from Source.calibrationA/B
+ * (fitted by the feedback loop) and applied to source-stated probabilities
+ * during blending.
+ *
+ * Per-prediction Kelly stakes are computed for top picks and value bets and
+ * persisted alongside the prediction.
  */
 export async function generatePredictionsForDate(dateStr: string): Promise<{
   matches: number;
@@ -745,13 +772,21 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
   let totalPredictions = 0;
 
   for (const match of matches) {
-    // Skip if already has predictions for this run
+    // Clear existing predictions for this match (we always rebuild)
     const existing = await db.prediction.findFirst({
       where: { matchId: match.id },
+      select: { id: true },
     });
-    // Clear existing predictions for this match (we always rebuild)
     if (existing) {
       await db.prediction.deleteMany({ where: { matchId: match.id } });
+    }
+
+    // Snapshot opening odds the first time we predict on this match
+    if (match.oddsJson && !match.openingOddsJson) {
+      await db.match.update({
+        where: { id: match.id },
+        data: { openingOddsJson: match.oddsJson },
+      });
     }
 
     const ctx: MatchContext = {
@@ -763,12 +798,24 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
         sourceName: rp.source.name,
         weight: rp.source.weight,
         prediction: reconstituteRaw(rp),
+        // Platt calibration params (fitted by feedback loop; identity if unset)
+        calibrationA: rp.source.calibrationA,
+        calibrationB: rp.source.calibrationB,
       })),
     };
 
     const enginePreds = buildPredictionsForMatch(ctx);
 
     for (const p of enginePreds) {
+      // Compute Kelly stake for top picks and value bets
+      let kellyFraction: number | null = null;
+      let recommendedStake: number | null = null;
+      if ((p.isTopPick || p.isValueBet) && p.bookOdds && p.bookOdds > 1) {
+        const k = kellyStake(p.probability, p.bookOdds);
+        kellyFraction = k.fullKelly;
+        recommendedStake = k.recommendedStake;
+      }
+
       await db.prediction.create({
         data: {
           matchId: match.id,
@@ -781,6 +828,8 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
           edge: p.edge ?? null,
           isTopPick: p.isTopPick,
           isValueBet: p.isValueBet,
+          kellyFraction,
+          recommendedStake,
           sourcesJson: JSON.stringify(p.sources),
         },
       });

@@ -25,7 +25,14 @@ model Source {
   correctPredictions Int   @default(0)
   accuracy      Float    @default(0)
   roi           Float    @default(0)
+  // ── Platt calibration (logistic) ─────────────────────────────────────────
+  // P(actual | source says p) = sigmoid(a * p + b)
+  // Defaults: a=1, b=0 → identity (no calibration). Fitted in feedback loop.
   calibration   Float    @default(0.5)
+  calibrationA  Float    @default(1)
+  calibrationB  Float    @default(0)
+  calibrationN  Int      @default(0)
+  calibrationJson String?
   lastScrapedAt DateTime?
   enabled       Boolean  @default(true)
   createdAt     DateTime @default(now())
@@ -70,6 +77,13 @@ model Match {
   corners     Int?
   cards       Int?
   oddsJson    String?
+  // ── Closing Line Value tracking ──────────────────────────────────────────
+  // openingOddsJson: odds snapshot taken when we first predicted the match
+  // closingOddsJson: odds snapshot taken just before kickoff (or at feedback)
+  // clvComputed:      true once CLV has been computed for this match's top picks
+  openingOddsJson String?
+  closingOddsJson String?
+  clvComputed     Boolean  @default(false)
   h2hJson     String?
   homeForm    String?
   awayForm    String?
@@ -115,6 +129,14 @@ model Prediction {
   edge        Float?
   isTopPick   Boolean  @default(false)
   isValueBet  Boolean  @default(false)
+  // ── Kelly criterion staking ──────────────────────────────────────────────
+  // kellyFraction:   full Kelly stake (0-1) — fraction of bankroll
+  // recommendedStake: fractional Kelly (default 1/4) clamped to [0, 0.05]
+  kellyFraction   Float?
+  recommendedStake Float?
+  // ── Closing Line Value for this individual prediction ─────────────────────
+  // (only populated for top picks and value bets)
+  clv             Float?
   sourcesJson String?
   evaluated   Boolean  @default(false)
   correct     Boolean?
@@ -136,6 +158,9 @@ model Parlay {
   combinedOdds Float
   confidence  Float
   expectedValue Float
+  // ── Kelly criterion for parlays ──────────────────────────────────────────
+  kellyFraction   Float?
+  recommendedStake Float?
   evaluated   Boolean  @default(false)
   won         Boolean?
   createdAt   DateTime @default(now())
@@ -155,6 +180,13 @@ model PerformanceSnapshot {
   parlayRoi   Float
   winStreak   Int
   loseStreak  Int
+  // ── Advanced metrics ─────────────────────────────────────────────────────
+  // avgClv:       mean CLV across top picks for this date (positive = good)
+  // kellyRoi:     ROI from Kelly-sized stakes (vs flat 1u roi above)
+  // calibrationError: Brier score (lower = better calibration)
+  avgClv            Float  @default(0)
+  kellyRoi          Float  @default(0)
+  calibrationError  Float  @default(0)
   marketBreakdownJson String?
   createdAt   DateTime @default(now())
 }

@@ -9,6 +9,7 @@
  */
 
 import { db } from "@/lib/db";
+import { kellyParlay as kellyParlayStake, type KellyResult } from "@/lib/learning/kelly";
 
 interface ParlayLeg {
   predictionId: string;
@@ -159,6 +160,19 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   // Clear existing parlays for this date
   await db.parlay.deleteMany({ where: { matchDate: dateStr } });
 
+  // Compute Kelly stake for each parlay type — fractional Kelly (1/8) with
+  // tighter caps because parlay variance is much higher than single bets.
+  const bestKelly: KellyResult = bestParlay.legs.length > 0
+    ? kellyParlayStake(bestParlay.combinedProbability, bestParlay.combinedOdds, bestParlay.legs.length)
+    : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
+  const safeKelly: KellyResult = safeParlay.legs.length > 0
+    ? kellyParlayStake(safeParlay.combinedProbability, safeParlay.combinedOdds, safeParlay.legs.length)
+    : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
+  const valueParlayEval = valueBets.length > 0 ? evaluateParlay(valueBets.slice(0, 3)) : null;
+  const valueKelly: KellyResult = valueParlayEval && valueParlayEval.legs.length > 0
+    ? kellyParlayStake(valueParlayEval.combinedProbability, valueParlayEval.combinedOdds, valueParlayEval.legs.length)
+    : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
+
   // Persist best parlay
   if (bestParlay.legs.length > 0) {
     await db.parlay.create({
@@ -171,6 +185,8 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         combinedOdds: bestParlay.combinedOdds,
         confidence: bestParlay.confidence,
         expectedValue: bestParlay.expectedValue,
+        kellyFraction: bestKelly.fullKelly,
+        recommendedStake: bestKelly.recommendedStake,
       },
     });
   }
@@ -187,23 +203,26 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         combinedOdds: safeParlay.combinedOdds,
         confidence: safeParlay.confidence,
         expectedValue: safeParlay.expectedValue,
+        kellyFraction: safeKelly.fullKelly,
+        recommendedStake: safeKelly.recommendedStake,
       },
     });
   }
 
   // Persist value-bet parlay (top 3 value bets)
-  if (valueBets.length > 0) {
-    const valueParlay = evaluateParlay(valueBets.slice(0, 3));
+  if (valueBets.length > 0 && valueParlayEval) {
     await db.parlay.create({
       data: {
         matchDate: dateStr,
         type: "value",
         legsJson: JSON.stringify(valueBets),
         legsCount: valueBets.length,
-        combinedProbability: valueParlay.combinedProbability,
-        combinedOdds: valueParlay.combinedOdds,
-        confidence: valueParlay.confidence,
-        expectedValue: valueParlay.expectedValue,
+        combinedProbability: valueParlayEval.combinedProbability,
+        combinedOdds: valueParlayEval.combinedOdds,
+        confidence: valueParlayEval.confidence,
+        expectedValue: valueParlayEval.expectedValue,
+        kellyFraction: valueKelly.fullKelly,
+        recommendedStake: valueKelly.recommendedStake,
       },
     });
   }

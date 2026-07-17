@@ -115,6 +115,8 @@ interface StatsResponse {
     confidence: number;
     bookOdds: number | null;
     edge: number | null;
+    recommendedStake?: number | null;
+    clv?: number | null;
   }>;
   valueBets: Array<{
     id: string;
@@ -124,6 +126,8 @@ interface StatsResponse {
     confidence: number;
     bookOdds: number | null;
     edge: number | null;
+    recommendedStake?: number | null;
+    clv?: number | null;
   }>;
   sources: SourceView[];
   recentScrapeLogs: Array<{
@@ -572,11 +576,14 @@ export default function Home() {
                         isTopPick: false,
                         isValueBet: true,
                         sourcesJson: null,
+                        recommendedStake: v.recommendedStake,
+                        clv: v.clv,
                       }}
                     />
                   ))}
                   <p className="text-xs text-muted-foreground italic text-center pt-2">
                     Showing top {statsQuery.data.valueBets.length} value bets by edge for {date}.
+                    Kelly stake = recommended % of bankroll (1/4 Kelly, capped at 5%).
                   </p>
                 </div>
               </>

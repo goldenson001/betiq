@@ -30,6 +30,9 @@ export interface SnapshotView {
   parlayRoi: number;
   winStreak: number;
   loseStreak: number;
+  avgClv?: number;
+  kellyRoi?: number;
+  calibrationError?: number;
   marketBreakdown: Record<string, { total: number; correct: number }>;
 }
 
@@ -44,6 +47,10 @@ export interface SourceView {
   roi: number;
   enabled: boolean;
   lastScrapedAt: string | null;
+  /** Platt calibration params — show how much we trust this source's probabilities. */
+  calibrationA?: number;
+  calibrationB?: number;
+  calibrationN?: number;
 }
 
 export interface AggregatesView {
@@ -54,6 +61,9 @@ export interface AggregatesView {
   parlaysMade: number;
   parlaysWon: number;
   parlayWinRate: number;
+  aggregateClv?: number;
+  aggregateKellyRoi?: number;
+  aggregateBrier?: number;
 }
 
 export interface MarketAggView {
@@ -228,6 +238,69 @@ export function PerformanceDashboard({
         />
       </div>
 
+      {/* Advanced ML metrics — CLV, Kelly ROI, Brier */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <StatCard
+          label="Closing Line Value"
+          value={aggregates.aggregateClv !== undefined ? `${(aggregates.aggregateClv * 100).toFixed(2)}%` : "—"}
+          delta={
+            aggregates.aggregateClv === undefined
+              ? "Awaiting closing odds"
+              : aggregates.aggregateClv > 0
+                ? "Beating the closing line"
+                : "Below closing line"
+          }
+          icon={TrendingUp}
+          trend={
+            aggregates.aggregateClv === undefined
+              ? "neutral"
+              : aggregates.aggregateClv > 0
+                ? "up"
+                : "down"
+          }
+        />
+        <StatCard
+          label="Kelly ROI"
+          value={aggregates.aggregateKellyRoi !== undefined ? `${(aggregates.aggregateKellyRoi * 100).toFixed(2)}%` : "—"}
+          delta={
+            aggregates.aggregateKellyRoi === undefined
+              ? "Awaiting value bets"
+              : aggregates.aggregateKellyRoi > 0
+                ? "Kelly staking profitable"
+                : "Kelly staking below breakeven"
+          }
+          icon={Target}
+          trend={
+            aggregates.aggregateKellyRoi === undefined
+              ? "neutral"
+              : aggregates.aggregateKellyRoi > 0
+                ? "up"
+                : "down"
+          }
+        />
+        <StatCard
+          label="Calibration (Brier)"
+          value={aggregates.aggregateBrier !== undefined ? aggregates.aggregateBrier.toFixed(4) : "—"}
+          delta={
+            aggregates.aggregateBrier === undefined
+              ? "Awaiting evaluations"
+              : aggregates.aggregateBrier < 0.2
+                ? "Well calibrated"
+                : aggregates.aggregateBrier < 0.25
+                  ? "Acceptable"
+                  : "Poorly calibrated"
+          }
+          icon={Activity}
+          trend={
+            aggregates.aggregateBrier === undefined
+              ? "neutral"
+              : aggregates.aggregateBrier < 0.2
+                ? "up"
+                : "down"
+          }
+        />
+      </div>
+
       {/* Win rate & ROI trend */}
       <Card>
         <CardHeader>
@@ -371,6 +444,11 @@ export function PerformanceDashboard({
                       <div className="font-semibold text-sm">{s.displayName}</div>
                       <div className="text-xs text-muted-foreground">
                         {s.totalPredictions} predictions · {s.correctPredictions} correct
+                        {s.calibrationN !== undefined && s.calibrationN > 0 && (
+                          <span className="ml-2 text-blue-600 dark:text-blue-400">
+                            · Platt a={s.calibrationA?.toFixed(2)} · n={s.calibrationN}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="text-right shrink-0">

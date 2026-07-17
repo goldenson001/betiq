@@ -12,6 +12,9 @@
  */
 
 import { db } from "@/lib/db";
+import { fitPlatt, brierScore, type PlattParams } from "./calibration";
+import { kelly as kellyStake } from "./kelly";
+import { computeClvForDate } from "./clv";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Result evaluation
@@ -189,6 +192,17 @@ export async function processResultsForDate(dateStr: string): Promise<{
   let predictionsEvaluated = 0;
   const sourceUpdates = new Map<string, { total: number; correct: number }>();
 
+  // ── ML calibration & staking collections ──────────────────────────────────
+  // Per-source (predicted prob, actual outcome) pairs — used to fit Platt
+  // scaling params so each source's probabilities become well-calibrated.
+  const calibrationSamples = new Map<string, Array<{ pred: number; actual: number }>>();
+  // Daily Brier score samples (across all engine predictions) — measures
+  // calibration quality of the overall ensemble.
+  const brierSamples: Array<{ pred: number; actual: number }> = [];
+  // Kelly-sized stakes & returns — used to compute Kelly ROI for the snapshot
+  let kellyStakeSum = 0;
+  let kellyReturnSum = 0;
+
   for (const match of matches) {
     // Look up the real ESPN result for this match
     const espn = byExternalId.get(match.externalId);
@@ -241,6 +255,14 @@ export async function processResultsForDate(dateStr: string): Promise<{
         data: { evaluated: true, correct },
       });
       predictionsEvaluated++;
+      // Collect Brier score sample for the daily calibration metric
+      brierSamples.push({ pred: p.probability, actual: correct ? 1 : 0 });
+      // Collect Kelly ROI sample for top picks / value bets
+      if ((p.isTopPick || p.isValueBet) && p.bookOdds && p.bookOdds > 1) {
+        const k = kellyStake(p.probability, p.bookOdds);
+        kellyStakeSum += k.recommendedStake;
+        if (correct) kellyReturnSum += k.recommendedStake * p.bookOdds;
+      }
     }
 
     // Evaluate each raw source prediction (for source-weight updates)
@@ -257,6 +279,21 @@ export async function processResultsForDate(dateStr: string): Promise<{
       cur.total += 1;
       cur.correct += correct ? 1 : 0;
       sourceUpdates.set(rp.sourceId, cur);
+
+      // Collect (probability, outcome) sample for Platt fitting.
+      // We need the source's stated probability — extract from the payload.
+      try {
+        const payload = JSON.parse(rp.payloadJson) as { probabilities?: { home?: number; draw?: number; away?: number } };
+        const probs = payload.probabilities;
+        if (probs) {
+          const pred = rp.predicted1X2 === "1" ? probs.home : rp.predicted1X2 === "2" ? probs.away : probs.draw;
+          if (pred !== undefined && pred > 0 && pred < 1) {
+            const arr = calibrationSamples.get(rp.sourceId) ?? [];
+            arr.push({ pred, actual: correct ? 1 : 0 });
+            calibrationSamples.set(rp.sourceId, arr);
+          }
+        }
+      } catch { /* payload parse failure — skip calibration sample */ }
     }
 
     await db.match.update({
@@ -265,7 +302,7 @@ export async function processResultsForDate(dateStr: string): Promise<{
     });
   }
 
-  // Update source accuracy and weights
+  // Update source accuracy, weights, and Platt calibration params
   for (const [sourceId, u] of sourceUpdates.entries()) {
     const source = await db.source.findUnique({ where: { id: sourceId } });
     if (!source) continue;
@@ -275,15 +312,58 @@ export async function processResultsForDate(dateStr: string): Promise<{
     // Weight update via exponential moving average toward accuracy
     // New weight = 0.5 * old + 0.5 * accuracy (clamped to [0.1, 0.95])
     const newWeight = Math.max(0.1, Math.min(0.95, 0.5 * source.weight + 0.5 * newAccuracy));
-    await db.source.update({
-      where: { id: sourceId },
-      data: {
-        totalPredictions: newTotal,
-        correctPredictions: newCorrect,
-        accuracy: newAccuracy,
-        weight: newWeight,
-      },
-    });
+
+    // Fit Platt scaling params from this source's accumulated calibration
+    // samples (combined with any previously-fitted params' sample count).
+    const samples = calibrationSamples.get(sourceId) ?? [];
+    let plattA = source.calibrationA;
+    let plattB = source.calibrationB;
+    let plattN = source.calibrationN;
+    if (samples.length >= 10) {
+      // Combine with existing samples for stability — we keep a rolling
+      // window of the most recent 500 samples per source.
+      const existingSamples: Array<{ pred: number; actual: number }> = (() => {
+        try { return JSON.parse(source.calibrationJson ?? "[]") as Array<{ pred: number; actual: number }>; }
+        catch { return []; }
+      })();
+      const combined = [...existingSamples, ...samples].slice(-500);
+      const params: PlattParams = fitPlatt(combined);
+      plattA = params.a;
+      plattB = params.b;
+      plattN = combined.length;
+      await db.source.update({
+        where: { id: sourceId },
+        data: {
+          totalPredictions: newTotal,
+          correctPredictions: newCorrect,
+          accuracy: newAccuracy,
+          weight: newWeight,
+          calibrationA: plattA,
+          calibrationB: plattB,
+          calibrationN: plattN,
+          calibrationJson: JSON.stringify(combined),
+        },
+      });
+    } else {
+      await db.source.update({
+        where: { id: sourceId },
+        data: {
+          totalPredictions: newTotal,
+          correctPredictions: newCorrect,
+          accuracy: newAccuracy,
+          weight: newWeight,
+        },
+      });
+    }
+  }
+
+  // Compute CLV for top picks & value bets on this date
+  let avgClv = 0;
+  try {
+    const clvResult = await computeClvForDate(dateStr);
+    avgClv = clvResult.avgClv;
+  } catch (err) {
+    console.warn("[feedback] CLV computation failed:", err);
   }
 
   // Evaluate parlays
@@ -323,8 +403,10 @@ export async function processResultsForDate(dateStr: string): Promise<{
     });
   }
 
-  // Compute daily performance snapshot
-  await computePerformanceSnapshot(dateStr);
+  // Compute daily performance snapshot (with Brier, Kelly ROI, CLV)
+  const brier = brierScore(brierSamples);
+  const kellyRoi = kellyStakeSum > 0 ? (kellyReturnSum - kellyStakeSum) / kellyStakeSum : 0;
+  await computePerformanceSnapshot(dateStr, brier, kellyRoi, avgClv);
 
   return {
     matchesProcessed: matches.length,
@@ -333,7 +415,12 @@ export async function processResultsForDate(dateStr: string): Promise<{
   };
 }
 
-async function computePerformanceSnapshot(dateStr: string): Promise<void> {
+async function computePerformanceSnapshot(
+  dateStr: string,
+  brier: number = 0,
+  kellyRoi: number = 0,
+  avgClv: number = 0
+): Promise<void> {
   const matches = await db.match.findMany({
     where: { matchDate: dateStr, resultProcessed: true },
     include: { predictions: true },
@@ -398,6 +485,9 @@ async function computePerformanceSnapshot(dateStr: string): Promise<void> {
       parlayRoi,
       winStreak,
       loseStreak,
+      avgClv,
+      kellyRoi,
+      calibrationError: brier,
       marketBreakdownJson: JSON.stringify(marketBreakdown),
     },
     update: {
@@ -410,6 +500,9 @@ async function computePerformanceSnapshot(dateStr: string): Promise<void> {
       parlayRoi,
       winStreak,
       loseStreak,
+      avgClv,
+      kellyRoi,
+      calibrationError: brier,
       marketBreakdownJson: JSON.stringify(marketBreakdown),
     },
   });

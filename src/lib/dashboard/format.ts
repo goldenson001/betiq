@@ -33,6 +33,37 @@ export function formatPercent(p: number, digits: number = 0): string {
   return `${(p * 100).toFixed(digits)}%`;
 }
 
+/**
+ * Format a Kelly stake (fraction of bankroll) for display.
+ * Returns "—" for null/0, "<0.1%" for tiny stakes, otherwise "X.XX%".
+ */
+export function formatKelly(stake: number | null | undefined): string {
+  if (stake === null || stake === undefined || stake <= 0) return "—";
+  if (stake < 0.001) return "<0.1%";
+  return `${(stake * 100).toFixed(2)}%`;
+}
+
+/**
+ * Format a CLV (closing line value) for display.
+ * Positive = good (beat the closing line), negative = bad.
+ */
+export function formatClv(clv: number | null | undefined): string {
+  if (clv === null || clv === undefined) return "—";
+  const pct = (clv * 100).toFixed(1);
+  return `${clv > 0 ? "+" : ""}${pct}%`;
+}
+
+/**
+ * Color for a CLV value — green if positive, red if negative.
+ */
+export function clvColor(clv: number | null | undefined): string {
+  if (clv === null || clv === undefined) return "text-muted-foreground";
+  if (clv > 0.01) return "text-emerald-500 dark:text-emerald-400";
+  if (clv > 0) return "text-lime-500 dark:text-lime-400";
+  if (clv > -0.01) return "text-amber-500 dark:text-amber-400";
+  return "text-rose-500 dark:text-rose-400";
+}
+
 export function marketLabel(market: string): string {
   const labels: Record<string, string> = {
     "1x2": "Match Result (1X2)",

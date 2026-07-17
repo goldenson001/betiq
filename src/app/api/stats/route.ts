@@ -60,6 +60,8 @@ export async function GET(req: NextRequest) {
       confidence: p.confidence,
       bookOdds: p.bookOdds,
       edge: p.edge,
+      recommendedStake: p.recommendedStake,
+      clv: p.clv,
     })),
     valueBets: valueBets.map((p) => ({
       id: p.id,
@@ -69,6 +71,8 @@ export async function GET(req: NextRequest) {
       confidence: p.confidence,
       bookOdds: p.bookOdds,
       edge: p.edge,
+      recommendedStake: p.recommendedStake,
+      clv: p.clv,
     })),
     sources: sources.map((s) => ({
       name: s.name,

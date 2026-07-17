@@ -30,6 +30,8 @@ export interface MatchDetailView {
   homeForm: string | null;
   awayForm: string | null;
   h2hJson: string | null;
+  openingOddsJson: string | null;
+  closingOddsJson: string | null;
   league: { id: string; name: string; country: string } | null;
   predictions: PredictionView[];
   rawPredictions: Array<{

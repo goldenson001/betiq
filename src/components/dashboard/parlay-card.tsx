@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { TrendingUp, Shield, Target, Trophy } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatKelly } from "@/lib/dashboard/format";
 
 export interface ParlayLeg {
   predictionId: string;
@@ -28,6 +29,10 @@ export interface ParlayView {
   expectedValue: number;
   evaluated: boolean;
   won: boolean | null;
+  /** Kelly criterion recommended stake (fraction of bankroll, 0-0.02). */
+  recommendedStake?: number | null;
+  /** Full Kelly fraction (before fractional adjustment). */
+  kellyFraction?: number | null;
 }
 
 const TYPE_META: Record<string, { label: string; icon: typeof Trophy; color: string }> = {
@@ -41,6 +46,7 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
   const Icon = meta.icon;
   const ev = parlay.expectedValue;
   const isValue = parlay.type === "value";
+  const hasKelly = parlay.recommendedStake !== null && parlay.recommendedStake !== undefined && parlay.recommendedStake > 0;
 
   return (
     <Card className={cn("overflow-hidden border-l-4", isValue ? "border-l-amber-400" : "border-l-primary")}>
@@ -114,6 +120,22 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
             </div>
           </div>
         </div>
+
+        {hasKelly && (
+          <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-blue-400/30 bg-blue-400/5 px-3 py-2 rounded-md">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] font-bold uppercase tracking-wider text-blue-950 bg-blue-300 px-1.5 py-0.5 rounded">
+                Kelly Stake
+              </span>
+              <span className="text-[10px] text-muted-foreground">
+                1/4 Kelly · capped at 2% bankroll
+              </span>
+            </div>
+            <div className="text-sm font-mono font-bold text-blue-700 dark:text-blue-300">
+              {formatKelly(parlay.recommendedStake)}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

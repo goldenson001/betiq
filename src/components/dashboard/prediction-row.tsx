@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { confidenceColor, confidenceBg, formatOdds, edgeColor, marketLabel, selectionLabel } from "@/lib/dashboard/format";
+import { confidenceColor, confidenceBg, formatOdds, edgeColor, marketLabel, selectionLabel, formatKelly, formatClv, clvColor } from "@/lib/dashboard/format";
 
 export interface PredictionView {
   id: string;
@@ -15,11 +15,20 @@ export interface PredictionView {
   isTopPick: boolean;
   isValueBet: boolean;
   sourcesJson: string | null;
+  /** Kelly criterion recommended stake (fraction of bankroll, 0-0.05). Null if not computed. */
+  recommendedStake?: number | null;
+  /** Closing Line Value — did our pick beat the closing line? Null if not computed. */
+  clv?: number | null;
+  /** Whether this prediction has been evaluated against actual result. */
+  evaluated?: boolean;
+  correct?: boolean | null;
 }
 
 export function PredictionRow({ p, compact = false }: { p: PredictionView; compact?: boolean }) {
   const isValue = p.isValueBet;
   const isTop = p.isTopPick;
+  const hasKelly = p.recommendedStake !== undefined && p.recommendedStake !== null && p.recommendedStake > 0;
+  const hasClv = p.clv !== undefined && p.clv !== null;
   return (
     <div
       className={cn(
@@ -44,12 +53,33 @@ export function PredictionRow({ p, compact = false }: { p: PredictionView; compa
               VALUE
             </span>
           )}
+          {hasKelly && (
+            <span className="text-[9px] font-bold uppercase tracking-wider text-blue-950 bg-blue-300 px-1 py-0.5 rounded">
+              KELLY {formatKelly(p.recommendedStake)}
+            </span>
+          )}
+          {p.evaluated && p.correct !== null && p.correct !== undefined && (
+            <span className={cn(
+              "text-[9px] font-bold uppercase tracking-wider px-1 py-0.5 rounded",
+              p.correct ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"
+            )}>
+              {p.correct ? "WON" : "LOST"}
+            </span>
+          )}
         </div>
         <div className="text-xs sm:text-sm font-semibold truncate mt-0.5">
           {selectionLabel(p.market, p.selection)}
         </div>
       </div>
       <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+        {hasClv && (
+          <div className="text-right hidden md:block w-12">
+            <div className="text-[9px] uppercase tracking-wider text-muted-foreground leading-none">CLV</div>
+            <div className={cn("text-xs font-mono font-semibold tabular-nums", clvColor(p.clv))}>
+              {formatClv(p.clv)}
+            </div>
+          </div>
+        )}
         <div className="text-right">
           <div className="text-[9px] uppercase tracking-wider text-muted-foreground leading-none">Odds</div>
           <div className="text-xs sm:text-sm font-mono font-semibold tabular-nums">

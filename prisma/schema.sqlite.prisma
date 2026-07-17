@@ -25,6 +25,10 @@ model Source {
   accuracy      Float    @default(0)
   roi           Float    @default(0)
   calibration   Float    @default(0.5)
+  calibrationA  Float    @default(1)
+  calibrationB  Float    @default(0)
+  calibrationN  Int      @default(0)
+  calibrationJson String?
   lastScrapedAt DateTime?
   enabled       Boolean  @default(true)
   createdAt     DateTime @default(now())
@@ -69,6 +73,9 @@ model Match {
   corners     Int?
   cards       Int?
   oddsJson    String?
+  openingOddsJson String?
+  closingOddsJson String?
+  clvComputed     Boolean  @default(false)
   h2hJson     String?
   homeForm    String?
   awayForm    String?
@@ -114,6 +121,9 @@ model Prediction {
   edge        Float?
   isTopPick   Boolean  @default(false)
   isValueBet  Boolean  @default(false)
+  kellyFraction   Float?
+  recommendedStake Float?
+  clv             Float?
   sourcesJson String?
   evaluated   Boolean  @default(false)
   correct     Boolean?
@@ -135,6 +145,8 @@ model Parlay {
   combinedOdds Float
   confidence  Float
   expectedValue Float
+  kellyFraction   Float?
+  recommendedStake Float?
   evaluated   Boolean  @default(false)
   won         Boolean?
   createdAt   DateTime @default(now())
@@ -154,6 +166,9 @@ model PerformanceSnapshot {
   parlayRoi   Float
   winStreak   Int
   loseStreak  Int
+  avgClv            Float  @default(0)
+  kellyRoi          Float  @default(0)
+  calibrationError  Float  @default(0)
   marketBreakdownJson String?
   createdAt   DateTime @default(now())
 }

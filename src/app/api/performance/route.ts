@@ -30,6 +30,20 @@ export async function GET(req: NextRequest) {
   const parlaysMade = snapshots.reduce((s, x) => s + x.parlaysMade, 0);
   const parlaysWon = snapshots.reduce((s, x) => s + x.parlaysWon, 0);
 
+  // Advanced ML metrics (averaged across snapshots that have them)
+  const clvSnapshots = snapshots.filter((s) => s.avgClv !== 0);
+  const aggregateClv = clvSnapshots.length > 0
+    ? clvSnapshots.reduce((s, x) => s + (x.avgClv ?? 0), 0) / clvSnapshots.length
+    : undefined;
+  const kellySnapshots = snapshots.filter((s) => s.kellyRoi !== 0);
+  const aggregateKellyRoi = kellySnapshots.length > 0
+    ? kellySnapshots.reduce((s, x) => s + (x.kellyRoi ?? 0), 0) / kellySnapshots.length
+    : undefined;
+  const brierSnapshots = snapshots.filter((s) => s.calibrationError !== 0);
+  const aggregateBrier = brierSnapshots.length > 0
+    ? brierSnapshots.reduce((s, x) => s + (x.calibrationError ?? 0), 0) / brierSnapshots.length
+    : undefined;
+
   // Parse per-market breakdown aggregated across all snapshots
   const marketAgg: Record<string, { total: number; correct: number }> = {};
   for (const s of snapshots) {
@@ -62,6 +76,10 @@ export async function GET(req: NextRequest) {
       roi: s.roi,
       enabled: s.enabled,
       lastScrapedAt: s.lastScrapedAt,
+      // Platt calibration params (omitted if never fitted)
+      calibrationA: s.calibrationA !== 1 ? s.calibrationA : undefined,
+      calibrationB: s.calibrationB !== 0 ? s.calibrationB : undefined,
+      calibrationN: s.calibrationN > 0 ? s.calibrationN : undefined,
     })),
     aggregates: {
       totalPredictions,
@@ -71,6 +89,9 @@ export async function GET(req: NextRequest) {
       parlaysMade,
       parlaysWon,
       parlayWinRate: parlaysMade > 0 ? parlaysWon / parlaysMade : 0,
+      aggregateClv,
+      aggregateKellyRoi,
+      aggregateBrier,
     },
     marketAgg,
   });
