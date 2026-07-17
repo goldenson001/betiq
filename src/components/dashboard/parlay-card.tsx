@@ -66,7 +66,7 @@ const TYPE_META: Record<
     icon: Sparkles,
     color: "text-fuchsia-500",
     border: "border-l-fuchsia-500",
-    blurb: "5–6 legs · target combined odds ≥ 20/1 · lottery-style payout",
+    blurb: "3–6 legs · target combined odds ≥ 20/1 · lottery-style payout · longshot-tier legs",
   },
   // Legacy types (kept for back-compat with old DB rows)
   daily_best: {

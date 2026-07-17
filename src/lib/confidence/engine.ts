@@ -140,37 +140,43 @@ function buildGreedyParlay(
 }
 
 /**
- * Mega-odds builder — targets combined odds >= 20/1 by including lower-probability
- * legs. Inverted greedy: prefer legs with probability in [0.15, 0.40] (longshots
- * but not pure luck), then keep adding until combined odds >= 20 OR maxLegs reached.
+ * Mega-odds builder — targets combined odds >= 20/1 by stacking lower-probability
+ * legs. Uses a 3-tier fallback so we ALWAYS produce a Mega Odds card when any
+ * predictions exist (previously a strict 0.15-0.50 band could leave this tier empty
+ * and the old card would be wiped on pipeline re-run).
+ *
+ * Tier 1 — pure longshots: probability in [0.10, 0.50], sorted by odds desc
+ * Tier 2 — mid-probability boost: probability in [0.30, 0.60] to push combined odds
+ * Tier 3 — best-available fallback: any non-excluded leg, sorted by odds desc,
+ *          at least 3 legs (to keep the "mega" feel) even if combined odds < 20
  */
 function buildMegaOddsParlay(allLegs: ParlayLeg[]): ParlayCandidate {
   const EXCLUDED = new Set(["bet_builder", "win_btts", "correct_score", "htft"]);
-  const eligible = allLegs
-    .filter((l) => !EXCLUDED.has(l.market))
-    .filter((l) => l.probability >= 0.15 && l.probability <= 0.50)
-    .sort((a, b) => b.odds - a.odds); // highest odds first
-  if (eligible.length === 0) {
-    return evaluateParlay([]);
-  }
-  const legs: ParlayLeg[] = [];
-  const used = new Set<string>();
   const TARGET_ODDS = 20.0;
   const MAX_LEGS = 6;
-  for (const leg of eligible) {
+  const MIN_LEGS = 3;
+
+  const legs: ParlayLeg[] = [];
+  const used = new Set<string>();
+
+  // Tier 1 — pure longshots (prob 0.10-0.50, highest odds first)
+  const longshots = allLegs
+    .filter((l) => !EXCLUDED.has(l.market))
+    .filter((l) => l.probability >= 0.10 && l.probability <= 0.50)
+    .sort((a, b) => b.odds - a.odds);
+  for (const leg of longshots) {
     if (legs.length >= MAX_LEGS) break;
     if (used.has(leg.matchId)) continue;
     legs.push(leg);
     used.add(leg.matchId);
-    const cand = evaluateParlay(legs);
-    if (cand.combinedOdds >= TARGET_ODDS) break;
+    if (evaluateParlay(legs).combinedOdds >= TARGET_ODDS) break;
   }
-  // If we couldn't hit the target with longshots, fall back to adding a
-  // mid-probability leg to push the odds up
+
+  // Tier 2 — mid-probability boost (prob 0.30-0.60) if we haven't hit target
   if (legs.length < MAX_LEGS && evaluateParlay(legs).combinedOdds < TARGET_ODDS) {
     const mid = allLegs
       .filter((l) => !EXCLUDED.has(l.market))
-      .filter((l) => l.probability >= 0.30 && l.probability <= 0.55)
+      .filter((l) => l.probability >= 0.30 && l.probability <= 0.60)
       .filter((l) => !used.has(l.matchId))
       .sort((a, b) => b.odds - a.odds);
     for (const leg of mid) {
@@ -180,6 +186,27 @@ function buildMegaOddsParlay(allLegs: ParlayLeg[]): ParlayCandidate {
       if (evaluateParlay(legs).combinedOdds >= TARGET_ODDS) break;
     }
   }
+
+  // Tier 3 — best-available fallback: ANY non-excluded leg, regardless of prob,
+  // so we always produce a Mega Odds card when there are any predictions today.
+  // This prevents the mega_odds row from disappearing on pipeline re-runs.
+  if (legs.length < MIN_LEGS) {
+    legs.length = 0;
+    used.clear();
+    const anyLeg = allLegs
+      .filter((l) => !EXCLUDED.has(l.market))
+      .sort((a, b) => b.odds - a.odds);
+    for (const leg of anyLeg) {
+      if (legs.length >= Math.max(MIN_LEGS, Math.min(MAX_LEGS, 4))) break;
+      if (used.has(leg.matchId)) continue;
+      legs.push(leg);
+      used.add(leg.matchId);
+      if (legs.length >= MIN_LEGS && evaluateParlay(legs).combinedOdds >= TARGET_ODDS) break;
+    }
+  }
+
+  // If still nothing (no eligible legs at all), return empty
+  if (legs.length === 0) return evaluateParlay([]);
   return evaluateParlay(legs);
 }
 
