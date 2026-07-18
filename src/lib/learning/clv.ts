@@ -76,18 +76,89 @@ export async function snapshotOpeningOdds(matchId: string): Promise<void> {
  *
  * D1 upgrade: also appends the closing odds to the oddsSnapshotsJson array
  * as the final snapshot, so we have a complete open → mid → close timeline.
+ *
+ * ─── REAL IMPLEMENTATION (was previously a stub) ────────────────────────────
+ * Two-tier strategy for getting the closing line:
+ *   1. PREFERRED: re-fetch the match from ESPN's scoreboard. If ESPN still
+ *      shows the match (typically for 24h after kickoff), we get true closing
+ *      odds.
+ *   2. FALLBACK: promote the most recent entry from `oddsSnapshotsJson` to
+ *      `closingOddsJson`. The scheduler job (`snapshotOddsForDate`) captures
+ *      snapshots throughout the day; the last one before kickoff is the best
+ *      available approximation of the closing line.
+ *   3. LAST RESORT: fall back to `oddsJson` (current odds column). If even
+ *      that is empty, return null and let the caller skip CLV for this match.
+ *
+ * @param matchId         Internal Match ID (used for DB updates)
+ * @param matchExternalId ESPN event ID (used for re-fetch)
+ * @param matchDate       Date string (used for ESPN scoreboard lookup)
  */
 export async function snapshotClosingOdds(
-  matchExternalId: string,
+  matchId: string,
+  matchExternalId: string | null,
   matchDate: string
 ): Promise<string | null> {
-  // We piggyback on the ESPN fetch that the feedback loop already does —
-  // we expect the caller to pass us the closing odds if available.
-  // This function is a placeholder for direct re-fetching; in practice the
-  // feedback loop already has the ESPN result and can pass the odds through.
-  void matchExternalId;
-  void matchDate;
-  return null;
+  // ── Strategy 1: try to re-fetch from ESPN ──────────────────────────────
+  // We import lazily to avoid a circular dependency at module-load time
+  // (espn.ts → db → ... → clv.ts → espn.ts).
+  let espnOddsJson: string | null = null;
+  if (matchExternalId) {
+    try {
+      const { fetchEspnClosingOdds } = await import("../scrapers/espn-closing-odds");
+      espnOddsJson = await fetchEspnClosingOdds(matchExternalId, matchDate);
+    } catch (err) {
+      // Non-fatal — fall through to snapshot-based fallback.
+      console.warn(
+        `[clv] ESPN closing-odds re-fetch failed for ${matchExternalId}:`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+
+  // ── Strategy 2: load the most recent snapshot from the timeline ────────
+  const match = await db.match.findUnique({
+    where: { id: matchId },
+    select: { oddsSnapshotsJson: true, oddsJson: true, openingOddsJson: true },
+  });
+  if (!match) return null;
+
+  let snapshots: Array<{ capturedAt: string; oddsJson: string }> = [];
+  if (match.oddsSnapshotsJson) {
+    try {
+      snapshots = JSON.parse(match.oddsSnapshotsJson) as typeof snapshots;
+    } catch { /* ignore parse errors */ }
+  }
+  const lastSnapshot = snapshots.length > 0 ? snapshots[snapshots.length - 1].oddsJson : null;
+
+  // ── Pick the best available source of closing odds ─────────────────────
+  // Priority: ESPN re-fetch > last snapshot > current oddsJson > opening odds
+  const closingOddsJson =
+    espnOddsJson ??
+    lastSnapshot ??
+    match.oddsJson ??
+    match.openingOddsJson ??
+    null;
+
+  if (!closingOddsJson) return null;
+
+  // ── Persist as the canonical closing line ──────────────────────────────
+  await db.match.update({
+    where: { id: matchId },
+    data: { closingOddsJson },
+  });
+
+  // Also append to the snapshot timeline so we have a full audit trail
+  // (only if it differs from the last entry to avoid duplicates).
+  if (closingOddsJson && (snapshots.length === 0 || snapshots[snapshots.length - 1].oddsJson !== closingOddsJson)) {
+    snapshots.push({ capturedAt: new Date().toISOString(), oddsJson: closingOddsJson });
+    if (snapshots.length > 10) snapshots = snapshots.slice(-10);
+    await db.match.update({
+      where: { id: matchId },
+      data: { oddsSnapshotsJson: JSON.stringify(snapshots) },
+    });
+  }
+
+  return closingOddsJson;
 }
 
 /**
@@ -243,18 +314,39 @@ export async function computeClvForDate(dateStr: string): Promise<{
   let clvSum = 0;
 
   for (const match of matches) {
-    // We need closing odds. If we don't have them stored, fall back to
-    // openingOddsJson (effectively CLV = 0, but we still mark as computed
-    // so we don't keep retrying).
-    const closingOddsJson = match.closingOddsJson ?? match.openingOddsJson ?? match.oddsJson;
+    // ── Active closing-odds capture ──────────────────────────────────────
+    // If we don't already have closingOddsJson, attempt to capture it now
+    // by re-fetching ESPN (preferred) or promoting the last snapshot. This
+    // is what was previously a stub — without this, CLV was effectively
+    // always 0 because we fell back to openingOddsJson.
+    let closingOddsJson = match.closingOddsJson;
     if (!closingOddsJson) {
+      try {
+        closingOddsJson = await snapshotClosingOdds(
+          match.id,
+          match.externalId ?? null,
+          dateStr
+        );
+      } catch (err) {
+        console.warn(
+          `[clv] snapshotClosingOdds failed for match ${match.id}:`,
+          err instanceof Error ? err.message : String(err)
+        );
+        closingOddsJson = null;
+      }
+    }
+
+    // Final fallback: opening odds → CLV = 0 but we still mark as computed
+    // so we don't keep retrying every feedback run.
+    const effectiveClosingOddsJson = closingOddsJson ?? match.openingOddsJson ?? match.oddsJson;
+    if (!effectiveClosingOddsJson) {
       await db.match.update({ where: { id: match.id }, data: { clvComputed: true } });
       continue;
     }
 
     let closingOdds: Record<string, number> = {};
     try {
-      closingOdds = JSON.parse(closingOddsJson) as Record<string, number>;
+      closingOdds = JSON.parse(effectiveClosingOddsJson) as Record<string, number>;
     } catch {
       await db.match.update({ where: { id: match.id }, data: { clvComputed: true } });
       continue;

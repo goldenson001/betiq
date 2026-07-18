@@ -1,23 +1,39 @@
 /**
- * ML-Driven Parlay Selection
- * ──────────────────────────
+ * ML-Driven Parlay Selection (De-correlated v2)
+ * ──────────────────────────────────────────────
  * Replaces the naive `probability × confidence` ranking used by the parlay
- * builder with an ML reliability score that combines:
+ * builder with an ML reliability score that combines SIX de-correlated signals:
  *
  *   1. Calibrated probability (Platt-scaled per source, then weighted-averaged)
- *   2. Multi-source consensus (more independent sources agreeing = safer)
- *   3. Low disagreement (stdev of per-source probabilities — lower = more reliable)
- *   4. Per-(market, league) historical CLV (does this combo beat the closing line?)
- *   5. Per-source rolling Brier score (sources with good recent calibration)
- *   6. Per-source rolling CLV (sources that systematically beat the close)
- *   7. Per-tier historical win rate (Bayesian prior from ParlayTierStats)
- *   8. Past H2H agreement — does the historical head-to-head record between
- *      these two teams ENDORSE the prediction's selection? H2H captures
- *      stylistic mismatches that generic form misses (e.g. a counter-attacking
- *      side that consistently beats a possession side). The agreement score is
- *      market-aware: 1X2/DC/DNB use direct H2H probabilities, OU markets use
- *      H2H avg goals, BTTS uses H2H both-scored %, and other markets use a
- *      generic "predictability" signal.
+ *   2. Source cohesion — multi-source agreement AND low disagreement, combined
+ *      via geometric mean so a leg needs BOTH to score high. (Collapses the
+ *      previously-correlated `consensus` and `lowDisagreement` signals.)
+ *   3. Per-(market, league) historical CLV (does this combo beat the closing line?)
+ *   4. Source quality — per-source Brier AND CLV combined via geometric mean.
+ *      (Collapses the previously-correlated `sourceBrier` and `sourceClv`.)
+ *   5. Per-tier historical win rate (Bayesian prior from ParlayTierStats)
+ *   6. Past H2H agreement — DOMINANT safety signal. Market-aware: 1X2/DC/DNB
+ *      use direct H2H probabilities, OU markets use H2H avg goals, BTTS uses
+ *      H2H both-scored %.
+ *
+ * ─── WHY THE DE-CORRELATION ─────────────────────────────────────────────────
+ * v1 had 8 components, but two pairs were mathematically related:
+ *   - `consensus` (# sources) and `lowDisagreement` (1 - stdev) are linked:
+ *     more sources agreeing → lower stdev by construction.
+ *   - `sourceBrier` (calibration) and `sourceClv` (sharpness) both measure
+ *     "source quality" and overlap heavily in practice.
+ * Counting both members of a correlated pair double-counts the same signal.
+ * The v2 model collapses each pair into a single component using geometric
+ * mean — which requires BOTH sub-signals to be strong for the combined
+ * component to score well. This:
+ *   - Removes the double-counting bias.
+ *   - Tightens the model (6 effective signals instead of 8 noisy ones).
+ *   - Frees weight budget that we redirect into H2H (the dominant safety
+ *     signal the user explicitly asked for).
+ *
+ * For backward compatibility (UI tooltips, persisted componentsJson), the
+ * individual sub-signals are STILL computed and exposed on `components` —
+ * but the WEIGHTED SUM uses the collapsed aggregates.
  *
  * The model is SELF-LEARNING: after every parlay settles, the feedback loop
  * calls `updateParlayTierStats()` which updates the rolling win rate. The next
@@ -74,9 +90,19 @@ export interface LegMLScore {
   calibratedProb: number;
   /** ML-adjusted probability used for parlay math. */
   adjustedProb: number;
-  /** Per-component breakdown for audit + UI tooltip. */
+  /** Per-component breakdown for audit + UI tooltip.
+   *
+   * Includes BOTH the v2 aggregated components (used in the weighted sum) AND
+   * the v1 sub-components (for backward-compatible UI display). The aggregated
+   * fields are: `sourceCohesion`, `sourceQuality`. The legacy fields are kept
+   * so persisted Parlay rows from before the de-correlation still render.
+   */
   components: {
     prob: number;            // calibrated prob component (0-1)
+    // ── v2 aggregated components (used in weighted sum) ──
+    sourceCohesion: number;  // geom mean of consensus × lowDisagreement
+    sourceQuality: number;   // geom mean of sourceBrier × sourceClv
+    // ── legacy sub-components (display only, not in weighted sum) ──
     consensus: number;       // multi-source agreement (0-1)
     lowDisagreement: number; // 1 - normalized disagreement (0-1)
     marketClv: number;       // sigmoid(CLV) — positive CLV → >0.5
@@ -103,33 +129,29 @@ export interface ParlayTierStatsRow {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Weights — tuned for SAFETY-FIRST parlays
+// Weights — DE-CORRELATED v2
 // ──────────────────────────────────────────────────────────────────────────────
-// These weights determine how much each ML signal contributes to the final
-// reliability score. They sum to 1.0.
+// 6 effective signals (down from 8). The two correlated pairs have been
+// collapsed into single aggregates, freeing weight budget that we redirect
+// into H2H (the dominant safety signal the user explicitly asked for).
 //
-// Past H2H form is now the SINGLE LARGEST signal in the model — bigger than
-// calibrated probability itself — because the user's #1 directive is:
-// "ML must use past H2H form to make the safest decision." Historical head-to-
-// head matchups are the most reliable predictor of stylistic mismatches that
-// form/elo/raw probability miss.
+// Verified sum: 0.25 + 0.13 + 0.10 + 0.10 + 0.05 + 0.37 = 1.00
 //
-// A 0.80 prob pick that H2H actively contradicts (e.g. home side has lost 7
-// of last 10 to this opponent) gets DRAMATICALLY downweighted — and on top
-// of the weight boost, the engine also applies a HARD H2H filter per tier
-// (see `minH2HAgreement` in buildGreedyParlayML / buildTargetOddsParlayML).
-// So H2H acts as BOTH a primary scoring signal AND a hard safety gate.
+// H2H is now 0.37 — over a third of the entire reliability score. A 0.80 prob
+// pick that H2H actively contradicts will see its reliability drop by up to
+// 0.37 × (1 - 0) = 0.37 points vs a fully-endorsed pick. Combined with the
+// hard per-tier H2H filter in buildGreedyParlayML, this means a contradicting
+// H2H is BOTH a scoring penalty AND a hard exclusion from safest/medium tiers.
 //
-// Verified sum: 0.25 + 0.10 + 0.07 + 0.12 + 0.08 + 0.05 + 0.05 + 0.28 = 1.00
+// These weights are STARTING VALUES. Use `scripts/backtest-weights.ts` to
+// grid-search against historical settled matches and re-calibrate.
 export const ML_WEIGHTS = {
   prob: 0.25,            // Calibrated probability — 2nd-largest signal
-  consensus: 0.10,       // Multi-source agreement
-  lowDisagreement: 0.07, // Sources agreeing on the probability
-  marketClv: 0.12,       // This combo historically beats the closing line
-  sourceBrier: 0.08,     // Sources with good recent calibration
-  sourceClv: 0.05,       // Sources that beat the closing line
+  sourceCohesion: 0.13,  // Collapsed consensus × lowDisagreement
+  marketClv: 0.10,       // This combo historically beats the closing line
+  sourceQuality: 0.10,   // Collapsed sourceBrier × sourceClv
   tierHistory: 0.05,     // Win rate of similar parlays historically
-  h2h: 0.28,             // Past H2H agreement — DOMINANT safety signal
+  h2h: 0.37,             // Past H2H agreement — DOMINANT safety signal
 } as const;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -144,6 +166,13 @@ export const ML_WEIGHTS = {
  *
  * The score is a weighted linear combination of normalized components, each
  * in [0, 1]. Weights sum to 1.0 (see ML_WEIGHTS).
+ *
+ * The two correlated sub-component pairs are combined via geometric mean
+ * BEFORE the weighted sum, which:
+ *   - Removes double-counting of the same underlying signal.
+ *   - Requires BOTH sub-signals to be strong (a leg with 4 sources but high
+ *     disagreement scores low on `sourceCohesion`, not high).
+ *   - Is symmetric and bounded in [0, 1] like its inputs.
  */
 export function computeLegMLScore(
   leg: LegInput,
@@ -164,26 +193,40 @@ export function computeLegMLScore(
     ? Math.max(0.001, Math.min(0.999, weightedProb / weightSum))
     : leg.probability; // fallback to engine probability if no source info
 
-  // ── Component 2: Multi-source consensus ────────────────────────────────
+  // ── Sub-component 2a: Multi-source consensus ───────────────────────────
   // Normalized: 1 source = 0.0, 2 sources = 0.33, 3 sources = 0.67, 4+ = 1.0
   // (Saturates at 4 sources — beyond that, more sources don't add much.)
   const consensus = Math.min(1, Math.max(0, (leg.consensusSources - 1) / 3));
 
-  // ── Component 3: Low disagreement ──────────────────────────────────────
+  // ── Sub-component 2b: Low disagreement ─────────────────────────────────
   // disagreement is the stdev of per-source probabilities. 0 = perfect
   // agreement, ~0.3 = high disagreement. Normalize: 1 - min(disagreement/0.3, 1)
   const disagreementNorm = leg.disagreement !== null && leg.disagreement !== undefined
     ? Math.min(1, Math.max(0, 1 - leg.disagreement / 0.3))
     : 0.5; // unknown disagreement → neutral
 
-  // ── Component 4: Market-league CLV ────────────────────────────────────
+  // ── Component 2 (v2): Source cohesion = sqrt(consensus × lowDisagreement) ──
+  // Geometric mean so a leg needs BOTH many sources AND low disagreement.
+  // A single-source leg (consensus=0) gets 0 even if disagreement is 0.
+  // A 4-source leg with stdev 0.3 (lowDisagreement=0) also gets 0.
+  // This de-correlates the two previously-overlapping signals.
+  //
+  // Cold start when disagreement is unknown: we still have consensus, so we
+  // use sqrt(consensus × 0.5) — giving the leg partial credit for source count
+  // without double-counting the unknown disagreement.
+  const cohesionLowDisagForAgg = (leg.disagreement === null || leg.disagreement === undefined)
+    ? 0.5
+    : disagreementNorm;
+  const sourceCohesion = Math.sqrt(consensus * cohesionLowDisagForAgg);
+
+  // ── Component 3: Market-league CLV ────────────────────────────────────
   // CLV > 0 = we beat the closing line (good). Sigmoid so +5% CLV → ~0.99,
   // 0% CLV → 0.5, -5% CLV → ~0.01.
   const marketClv = leg.marketLeagueClv !== null
     ? sigmoid((leg.marketLeagueClv ?? 0) * 6) // ×6 so ±5% CLV saturates
     : 0.5; // no history → neutral
 
-  // ── Component 5: Source Brier (recent calibration quality) ─────────────
+  // ── Sub-component 4a: Source Brier (recent calibration quality) ─────────
   // Weighted average of (1 - brier/0.25) across sources. Brier 0 = perfect,
   // 0.25 = random. So (1 - brier/0.25) maps [0, 0.25] → [1, 0].
   let brierSum = 0;
@@ -195,7 +238,7 @@ export function computeLegMLScore(
   }
   const sourceBrier = brierWeight > 0 ? brierSum / brierWeight : 0.5;
 
-  // ── Component 6: Source CLV (recent CLV performance) ───────────────────
+  // ── Sub-component 4b: Source CLV (recent CLV performance) ──────────────
   let clvSum = 0;
   let clvWeight = 0;
   for (const s of leg.sources) {
@@ -205,23 +248,34 @@ export function computeLegMLScore(
   }
   const sourceClv = clvWeight > 0 ? clvSum / clvWeight : 0.5;
 
-  // ── Component 7: Tier historical win rate ──────────────────────────────
+  // ── Component 4 (v2): Source quality = sqrt(sourceBrier × sourceClv) ────
+  // Geometric mean so a source must be BOTH well-calibrated AND sharp (beat
+  // the close) to score high. A perfectly-calibrated source that never beats
+  // the close is theoretical-only; a CLV winner with poor calibration is
+  // noisy. Both halves matter.
+  const sourceQuality = Math.sqrt(sourceBrier * sourceClv);
+
+  // ── Component 5: Tier historical win rate ──────────────────────────────
   // Cold-start (sampleCount = 0): use 0.5 (neutral). As samples accumulate,
   // the actual win rate takes over.
   const tierHistory = tierSampleCount > 0
     ? Math.max(0, Math.min(1, tierHistoryWinRate))
     : 0.5;
 
-  // ── Component 8: Past H2H agreement ────────────────────────────────────
+  // ── Component 6: Past H2H agreement ────────────────────────────────────
   // Market-aware agreement between the prediction's selection and the
   // historical head-to-head record. Returns null if no H2H data — we then
   // fall back to 0.5 (neutral) so legs without H2H data aren't penalized.
   const h2hBreakdown = computeH2HAgreement(leg.h2hJson, leg.market, leg.selection);
   const h2h = h2hBreakdown ? h2hBreakdown.score : 0.5;
 
-  // ── Weighted combination ────────────────────────────────────────────────
-  const components = {
+  // ── Weighted combination (uses v2 aggregated components) ───────────────
+  const components: LegMLScore["components"] = {
     prob: calibratedProb,
+    // v2 aggregates — used in the weighted sum
+    sourceCohesion,
+    sourceQuality,
+    // legacy sub-components — kept for UI display only
     consensus,
     lowDisagreement: disagreementNorm,
     marketClv,
@@ -233,11 +287,9 @@ export function computeLegMLScore(
 
   const reliability = Math.max(0, Math.min(1,
     ML_WEIGHTS.prob * components.prob +
-    ML_WEIGHTS.consensus * components.consensus +
-    ML_WEIGHTS.lowDisagreement * components.lowDisagreement +
+    ML_WEIGHTS.sourceCohesion * components.sourceCohesion +
     ML_WEIGHTS.marketClv * components.marketClv +
-    ML_WEIGHTS.sourceBrier * components.sourceBrier +
-    ML_WEIGHTS.sourceClv * components.sourceClv +
+    ML_WEIGHTS.sourceQuality * components.sourceQuality +
     ML_WEIGHTS.tierHistory * components.tierHistory +
     ML_WEIGHTS.h2h * components.h2h
   ));
@@ -470,4 +522,129 @@ export async function loadSourceMLInfo(): Promise<Map<string, SourceMLInfo>> {
     });
   }
   return map;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Weight backtest harness — used by scripts/backtest-weights.ts
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Custom-weight variant of `computeLegMLScore` used by the weight backtester.
+ *
+ * Same logic as `computeLegMLScore` but accepts an alternative weight vector
+ * so the backtester can grid-search different combinations without mutating
+ * the production `ML_WEIGHTS` constant. The returned shape is the same as
+ * `LegMLScore` (with `sampleCount` and `h2hBreakdown` set to neutral defaults
+ * since the backtester typically runs in cold-start mode without per-tier
+ * historical data).
+ */
+export function computeLegMLScoreWithWeights(
+  leg: LegInput,
+  weights: {
+    prob: number;
+    sourceCohesion: number;
+    marketClv: number;
+    sourceQuality: number;
+    tierHistory: number;
+    h2h: number;
+  },
+  tierHistoryWinRate: number = 0.5,
+  tierSampleCount: number = 0
+): LegMLScore {
+  // Reuse the canonical computation by temporarily swapping the weights.
+  // We can't reassign ML_WEIGHTS (it's `as const`), so we inline the math.
+  let weightedProb = 0;
+  let weightSum = 0;
+  for (const s of leg.sources) {
+    const calibrated = applyPlatt(s.rawProb, s.calibrationA, s.calibrationB);
+    weightedProb += s.weight * calibrated;
+    weightSum += s.weight;
+  }
+  const calibratedProb = weightSum > 0
+    ? Math.max(0.001, Math.min(0.999, weightedProb / weightSum))
+    : leg.probability;
+
+  const consensus = Math.min(1, Math.max(0, (leg.consensusSources - 1) / 3));
+  const disagreementNorm = leg.disagreement !== null && leg.disagreement !== undefined
+    ? Math.min(1, Math.max(0, 1 - leg.disagreement / 0.3))
+    : 0.5;
+  const cohesionLowDisagForAgg = (leg.disagreement === null || leg.disagreement === undefined)
+    ? 0.5
+    : disagreementNorm;
+  const sourceCohesion = Math.sqrt(consensus * cohesionLowDisagForAgg);
+
+  const marketClv = leg.marketLeagueClv !== null
+    ? sigmoid((leg.marketLeagueClv ?? 0) * 6)
+    : 0.5;
+
+  let brierSum = 0, brierWeight = 0;
+  for (const s of leg.sources) {
+    const score = Math.max(0, Math.min(1, 1 - s.brier30d / 0.25));
+    brierSum += s.weight * score;
+    brierWeight += s.weight;
+  }
+  const sourceBrier = brierWeight > 0 ? brierSum / brierWeight : 0.5;
+
+  let clvSum = 0, clvWeight = 0;
+  for (const s of leg.sources) {
+    const score = sigmoid(s.clv30d * 6);
+    clvSum += s.weight * score;
+    clvWeight += s.weight;
+  }
+  const sourceClv = clvWeight > 0 ? clvSum / clvWeight : 0.5;
+  const sourceQuality = Math.sqrt(sourceBrier * sourceClv);
+
+  const tierHistory = tierSampleCount > 0
+    ? Math.max(0, Math.min(1, tierHistoryWinRate))
+    : 0.5;
+
+  const h2hBreakdown = computeH2HAgreement(leg.h2hJson, leg.market, leg.selection);
+  const h2h = h2hBreakdown ? h2hBreakdown.score : 0.5;
+
+  const components: LegMLScore["components"] = {
+    prob: calibratedProb,
+    sourceCohesion,
+    sourceQuality,
+    consensus,
+    lowDisagreement: disagreementNorm,
+    marketClv,
+    sourceBrier,
+    sourceClv,
+    tierHistory,
+    h2h,
+  };
+
+  const reliability = Math.max(0, Math.min(1,
+    weights.prob * components.prob +
+    weights.sourceCohesion * components.sourceCohesion +
+    weights.marketClv * components.marketClv +
+    weights.sourceQuality * components.sourceQuality +
+    weights.tierHistory * components.tierHistory +
+    weights.h2h * components.h2h
+  ));
+
+  const adjustedProb = Math.max(0.001, Math.min(0.999,
+    calibratedProb * 0.7 + reliability * 0.3
+  ));
+
+  return {
+    reliability,
+    calibratedProb,
+    adjustedProb,
+    components,
+    sampleCount: tierSampleCount,
+    h2hBreakdown,
+  };
+}
+
+/**
+ * Validate that a candidate weight vector sums to 1.0 (within tolerance).
+ * Used by the backtester to skip invalid grid points.
+ */
+export function isValidWeightVector(
+  w: { prob: number; sourceCohesion: number; marketClv: number; sourceQuality: number; tierHistory: number; h2h: number },
+  tolerance: number = 0.001
+): boolean {
+  const sum = w.prob + w.sourceCohesion + w.marketClv + w.sourceQuality + w.tierHistory + w.h2h;
+  return Math.abs(sum - 1.0) <= tolerance;
 }

@@ -369,14 +369,17 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
                             `Calibrated prob: ${legML?.calibratedProb !== null && legML?.calibratedProb !== undefined ? (legML.calibratedProb * 100).toFixed(1) + "%" : "—"}\n` +
                             `Adjusted prob: ${legML?.adjustedProb !== null && legML?.adjustedProb !== undefined ? (legML.adjustedProb * 100).toFixed(1) + "%" : "—"}\n` +
                             (legML?.components
-                              ? `Components:\n` +
-                                `  prob:          ${(legML.components.prob * 100).toFixed(0)}%\n` +
-                                `  consensus:     ${(legML.components.consensus * 100).toFixed(0)}%\n` +
-                                `  lowDisagree:   ${(legML.components.lowDisagreement * 100).toFixed(0)}%\n` +
-                                `  marketClv:     ${(legML.components.marketClv * 100).toFixed(0)}%\n` +
-                                `  sourceBrier:   ${(legML.components.sourceBrier * 100).toFixed(0)}%\n` +
-                                `  sourceClv:     ${(legML.components.sourceClv * 100).toFixed(0)}%\n` +
-                                `  tierHistory:   ${(legML.components.tierHistory * 100).toFixed(0)}%`
+                              ? `Components (v2 de-correlated):\n` +
+                                `  prob:            ${(legML.components.prob * 100).toFixed(0)}%\n` +
+                                `  sourceCohesion:  ${(legML.components.sourceCohesion * 100).toFixed(0)}%  (consensus × lowDisagreement)\n` +
+                                `    ├ consensus:   ${(legML.components.consensus * 100).toFixed(0)}%\n` +
+                                `    └ lowDisagree: ${(legML.components.lowDisagreement * 100).toFixed(0)}%\n` +
+                                `  marketClv:       ${(legML.components.marketClv * 100).toFixed(0)}%\n` +
+                                `  sourceQuality:   ${(legML.components.sourceQuality * 100).toFixed(0)}%  (brier × clv)\n` +
+                                `    ├ sourceBrier: ${(legML.components.sourceBrier * 100).toFixed(0)}%\n` +
+                                `    └ sourceClv:   ${(legML.components.sourceClv * 100).toFixed(0)}%\n` +
+                                `  tierHistory:     ${(legML.components.tierHistory * 100).toFixed(0)}%\n` +
+                                `  h2h:             ${(legML.components.h2h * 100).toFixed(0)}%  (DOMINANT)`
                               : "")
                           : undefined
                       }
