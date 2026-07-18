@@ -1,7 +1,7 @@
 /**
  * Confidence Engine
  * ──────────────────
- * Takes the engine's per-match predictions and builds FOUR daily parlay tiers
+ * Takes the engine's per-match predictions and builds EIGHT daily parlay tiers
  * calibrated for different risk appetites:
  *
  *   1. safest      — 2-3 legs, each leg probability >= SAFEST_MIN_LEG_PROB
@@ -15,6 +15,12 @@
  *   4. mega_odds   — 5-6 legs targeting combined odds >= 20/1. Each leg
  *                    probability >= 0.15. Longshot parlay for lottery-style
  *                    payouts.
+ *   5. odds_3_a    — Target combined odds ~3.0 (±25%). Leg count is whatever
+ *   6. odds_3_b      it takes — each leg probability >= 0.70 (close-to-no-loss
+ *                    picks). Two independent parlays (A and B) so you have a
+ *                    choice; B excludes matches already used in A.
+ *   7. odds_5_a    — Target combined odds ~5.0 (±25%). Each leg probability
+ *   8. odds_5_b      >= 0.60. Same A/B independence rule.
  *
  * Each parlay also gets a Kelly criterion stake (1/8 fraction, capped at 2%
  * of bankroll — parlays are much higher variance than single bets).
@@ -26,12 +32,13 @@
  * Kelly, so effective stake shrinks for correlated parlays.
  *
  * B5 upgrade: No-overlap rule. Each match appears in AT MOST ONE parlay tier
- * per day. Build order: safest → medium → high → mega. Each tier claims its
- * matchIds and removes them from the pool seen by subsequent tiers. A tier
- * may end up empty if all its eligible matches were claimed by an earlier
- * tier — that's intentional (an empty tier is better than a duplicated leg).
+ * per day. Build order: safest → medium → high → mega → odds_3_a → odds_3_b
+ * → odds_5_a → odds_5_b. Each tier claims its matchIds and removes them from
+ * the pool seen by subsequent tiers. A tier may end up empty if all its
+ * eligible matches were claimed by an earlier tier — that's intentional
+ * (an empty tier is better than a duplicated leg).
  *
- * Persists all four parlays to DB. Idempotent: clears existing parlays for
+ * Persists all eight parlays to DB. Idempotent: clears existing parlays for
  * the date before re-creating.
  */
 
@@ -216,14 +223,127 @@ function buildMegaOddsParlay(allLegs: ParlayLeg[]): ParlayCandidate {
   return evaluateParlay(legs);
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// B6: Target-odds parlays (odds_3_a/b, odds_5_a/b)
+// ──────────────────────────────────────────────────────────────────────────────
+
 /**
- * Main entry — builds and persists all four parlay tiers for a date.
+ * Build a parlay that targets a specific combined odds (e.g. 3.0 or 5.0) by
+ * stacking the highest-quality legs available. Unlike the risk-tier parlays
+ * above, this builder does NOT care about leg count — it cares about getting
+ * the combined odds as close as possible to `targetOdds` while using only
+ * high-probability legs (so "close to no chance of losing" per user brief).
+ *
+ * Algorithm:
+ *   1. Filter legs to those with probability >= minLegProb.
+ *   2. Sort by (probability * confidence) desc — best picks first.
+ *   3. Greedily add legs while:
+ *        - combined odds < targetOdds * (1 + tolerance)  [stop once we hit target]
+ *        - the next leg's matchId isn't already in the parlay
+ *        - we haven't exceeded maxLegs (safety cap)
+ *   4. If after adding all eligible legs we still haven't reached the lower
+ *      bound, accept the best we got (rare — only on thin days).
+ *
+ * Key insight: high-probability legs have LOW odds (e.g. 0.92 prob → 1.03
+ * odds). So to reach combined odds of 3.0, we typically need 2-4 legs, not
+ * 6+ as the first attempt produced. The greedy loop naturally stops once
+ * the cumulative product crosses the lower bound.
+ *
+ * `usedMatchIds` is mutated — the caller passes the running set so this
+ * parlay doesn't reuse matches already claimed by earlier parlays (B5
+ * no-overlap rule).
+ */
+function buildTargetOddsParlay(
+  allLegs: ParlayLeg[],
+  opts: {
+    targetOdds: number;
+    /** Acceptable range around target. Default 0.25 = ±25% (e.g. 3.0 → 2.25–3.75). */
+    tolerance?: number;
+    minLegProb: number;
+    /** Hard cap on leg count. Default 8. */
+    maxLegs?: number;
+    /** Minimum legs to keep even if we can't hit target. Default 2. */
+    minLegs?: number;
+  },
+  usedMatchIds: Set<string>
+): ParlayCandidate {
+  const EXCLUDED = new Set(["bet_builder", "win_btts", "correct_score", "htft"]);
+  const tolerance = opts.tolerance ?? 0.25;
+  const maxLegs = opts.maxLegs ?? 8;
+  const minLegs = opts.minLegs ?? 2;
+  const target = opts.targetOdds;
+  const lowerBound = target * (1 - tolerance);
+  const upperBound = target * (1 + tolerance);
+
+  // Eligible legs: not excluded, not already used, prob >= minLegProb.
+  // Sort by ODDS DESCENDING so we pick higher-odds (but still high-prob) legs
+  // first — this gets the combined product to the target faster. Among legs
+  // with similar odds, the higher-probability one comes first via tiebreak.
+  // (Previously sorted by quality desc, which picked all 1.03 legs first and
+  // never reached the target — produced 6 legs at combined odds 1.22.)
+  const eligible = allLegs
+    .filter((l) => !EXCLUDED.has(l.market))
+    .filter((l) => !usedMatchIds.has(l.matchId))
+    .filter((l) => l.probability >= opts.minLegProb)
+    .sort((a, b) => {
+      // Primary: odds descending (higher odds first → reach target faster)
+      if (Math.abs(b.odds - a.odds) > 0.01) return b.odds - a.odds;
+      // Secondary: quality descending (when odds are similar, prefer stronger pick)
+      return b.probability * b.confidence - a.probability * a.confidence;
+    });
+
+  if (eligible.length === 0) {
+    return evaluateParlay([]);
+  }
+
+  const legs: ParlayLeg[] = [];
+  const localUsed = new Set<string>(usedMatchIds);
+  let currentOdds = 1.0;
+
+  // Greedy: keep adding the best-quality leg until we cross lowerBound.
+  // We do NOT skip low-odds legs (a 1.05 leg is fine if it's a strong pick)
+  // — the loop naturally stops once cumulative odds hits the target.
+  for (const leg of eligible) {
+    if (legs.length >= maxLegs) break;
+    if (localUsed.has(leg.matchId)) continue;
+
+    // If adding this leg would overshoot upperBound by too much AND we
+    // already have minLegs, skip it (try to land closer to target).
+    // But if we haven't hit minLegs yet, add it anyway — we need at least 2.
+    const projectedOdds = currentOdds * leg.odds;
+    if (legs.length >= minLegs && projectedOdds > upperBound) {
+      // Skip this leg — it'd push us past the target range.
+      // Look for a leg with lower odds that keeps us in range.
+      continue;
+    }
+
+    legs.push(leg);
+    localUsed.add(leg.matchId);
+    currentOdds = projectedOdds;
+
+    // Stop once we've crossed the lower bound and have at least minLegs.
+    if (legs.length >= minLegs && currentOdds >= lowerBound) break;
+  }
+
+  // If we never hit the lower bound (rare — thin day with few eligible legs),
+  // accept whatever we have. The UI will show the actual combined odds.
+  if (legs.length === 0) return evaluateParlay([]);
+
+  return evaluateParlay(legs);
+}
+
+/**
+ * Main entry — builds and persists all parlay tiers for a date.
  */
 export async function buildAndPersistParlays(dateStr: string): Promise<{
   safest: ParlayCandidate | null;
   mediumRisk: ParlayCandidate | null;
   highRisk: ParlayCandidate | null;
   megaOdds: ParlayCandidate | null;
+  odds3A: ParlayCandidate | null;
+  odds3B: ParlayCandidate | null;
+  odds5A: ParlayCandidate | null;
+  odds5B: ParlayCandidate | null;
 }> {
   // Load all predictions for date
   const matches = await db.match.findMany({
@@ -260,7 +380,10 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   }
 
   if (allLegs.length === 0) {
-    return { safest: null, mediumRisk: null, highRisk: null, megaOdds: null };
+    return {
+      safest: null, mediumRisk: null, highRisk: null, megaOdds: null,
+      odds3A: null, odds3B: null, odds5A: null, odds5B: null,
+    };
   }
 
   // ── No-overlap rule: each match appears in at most ONE parlay tier ─────────
@@ -303,6 +426,40 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   );
   for (const leg of megaOdds.legs) usedMatchIds.add(leg.matchId);
 
+  // ── B6: Target-odds parlays (user request) ────────────────────────────────
+  // Two parlays targeting combined odds of ~3.0, two targeting ~5.0.
+  // Leg count doesn't matter — only that each leg is a high-probability pick
+  // (≥0.70 for odds_3, ≥0.60 for odds_5) and the combined odds hits the target.
+  // These respect the no-overlap rule: odds_3_a picks first, then odds_3_b
+  // (excluding A's matches), then odds_5_a, then odds_5_b.
+  const odds3A = buildTargetOddsParlay(
+    allLegs,
+    { targetOdds: 3.0, tolerance: 0.25, minLegProb: 0.70, maxLegs: 6, minLegs: 2 },
+    usedMatchIds
+  );
+  for (const leg of odds3A.legs) usedMatchIds.add(leg.matchId);
+
+  const odds3B = buildTargetOddsParlay(
+    allLegs,
+    { targetOdds: 3.0, tolerance: 0.25, minLegProb: 0.70, maxLegs: 6, minLegs: 2 },
+    usedMatchIds
+  );
+  for (const leg of odds3B.legs) usedMatchIds.add(leg.matchId);
+
+  const odds5A = buildTargetOddsParlay(
+    allLegs,
+    { targetOdds: 5.0, tolerance: 0.25, minLegProb: 0.60, maxLegs: 7, minLegs: 2 },
+    usedMatchIds
+  );
+  for (const leg of odds5A.legs) usedMatchIds.add(leg.matchId);
+
+  const odds5B = buildTargetOddsParlay(
+    allLegs,
+    { targetOdds: 5.0, tolerance: 0.25, minLegProb: 0.60, maxLegs: 7, minLegs: 2 },
+    usedMatchIds
+  );
+  for (const leg of odds5B.legs) usedMatchIds.add(leg.matchId);
+
   // Clear existing parlays for this date (covers old "daily_best"/"safe"/"value" types too)
   await db.parlay.deleteMany({ where: { matchDate: dateStr } });
 
@@ -320,6 +477,18 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   const megaKelly: KellyResult = megaOdds.legs.length > 0
     ? kellyParlayStake(megaOdds.combinedProbability, megaOdds.combinedOdds, megaOdds.legs.length)
     : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
+  const odds3AKelly: KellyResult = odds3A.legs.length > 0
+    ? kellyParlayStake(odds3A.combinedProbability, odds3A.combinedOdds, odds3A.legs.length)
+    : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
+  const odds3BKelly: KellyResult = odds3B.legs.length > 0
+    ? kellyParlayStake(odds3B.combinedProbability, odds3B.combinedOdds, odds3B.legs.length)
+    : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
+  const odds5AKelly: KellyResult = odds5A.legs.length > 0
+    ? kellyParlayStake(odds5A.combinedProbability, odds5A.combinedOdds, odds5A.legs.length)
+    : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
+  const odds5BKelly: KellyResult = odds5B.legs.length > 0
+    ? kellyParlayStake(odds5B.combinedProbability, odds5B.combinedOdds, odds5B.legs.length)
+    : { fullKelly: 0, fractionalKelly: 0, recommendedStake: 0, edge: 0, isPositive: false };
 
   const tiers: Array<{
     type: string;
@@ -330,6 +499,10 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
     { type: "medium_risk", cand: mediumRisk, k: mediumKelly },
     { type: "high_risk", cand: highRisk, k: highKelly },
     { type: "mega_odds", cand: megaOdds, k: megaKelly },
+    { type: "odds_3_a", cand: odds3A, k: odds3AKelly },
+    { type: "odds_3_b", cand: odds3B, k: odds3BKelly },
+    { type: "odds_5_a", cand: odds5A, k: odds5AKelly },
+    { type: "odds_5_b", cand: odds5B, k: odds5BKelly },
   ];
 
   for (const tier of tiers) {
@@ -350,5 +523,5 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
     });
   }
 
-  return { safest, mediumRisk, highRisk, megaOdds };
+  return { safest, mediumRisk, highRisk, megaOdds, odds3A, odds3B, odds5A, odds5B };
 }

@@ -2,7 +2,7 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { TrendingUp, Shield, Flame, Trophy, Sparkles } from "lucide-react";
+import { TrendingUp, Shield, Flame, Trophy, Sparkles, Target } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatKelly } from "@/lib/dashboard/format";
 
@@ -20,7 +20,7 @@ export interface ParlayLeg {
 export interface ParlayView {
   id: string;
   matchDate: string;
-  /** One of: safest | medium_risk | high_risk | mega_odds (legacy: daily_best | safe | value) */
+  /** One of: safest | medium_risk | high_risk | mega_odds | odds_3_a | odds_3_b | odds_5_a | odds_5_b (legacy: daily_best | safe | value) */
   type: string;
   legs: ParlayLeg[];
   legsCount: number;
@@ -68,6 +68,38 @@ const TYPE_META: Record<
     border: "border-l-fuchsia-500",
     blurb: "3–6 legs · target combined odds ≥ 20/1 · lottery-style payout · longshot-tier legs",
   },
+  // ── B6: Target-odds parlays (user-requested) ───────────────────────────────
+  // Two parlays targeting ~3/1, two targeting ~5/1. Each leg is a high-prob
+  // pick (≥70% for odds_3, ≥60% for odds_5). Leg count is whatever it takes
+  // to hit the target combined odds — could be 2 legs, could be 6.
+  odds_3_a: {
+    label: "Target Odds 3 — Pick A",
+    icon: Target,
+    color: "text-cyan-500",
+    border: "border-l-cyan-500",
+    blurb: "Best high-prob picks · combined odds ≈ 3.0 · each leg ≥ 70% win prob",
+  },
+  odds_3_b: {
+    label: "Target Odds 3 — Pick B",
+    icon: Target,
+    color: "text-teal-500",
+    border: "border-l-teal-500",
+    blurb: "Alternate combo · different matches from Pick A · combined odds ≈ 3.0",
+  },
+  odds_5_a: {
+    label: "Target Odds 5 — Pick A",
+    icon: Target,
+    color: "text-indigo-500",
+    border: "border-l-indigo-500",
+    blurb: "Best high-prob picks · combined odds ≈ 5.0 · each leg ≥ 60% win prob",
+  },
+  odds_5_b: {
+    label: "Target Odds 5 — Pick B",
+    icon: Target,
+    color: "text-violet-500",
+    border: "border-l-violet-500",
+    blurb: "Alternate combo · different matches from Pick A · combined odds ≈ 5.0",
+  },
   // Legacy types (kept for back-compat with old DB rows)
   daily_best: {
     label: "Daily Best Parlay",
@@ -92,7 +124,19 @@ const TYPE_META: Record<
   },
 };
 
-const TYPE_ORDER = ["safest", "medium_risk", "high_risk", "mega_odds", "daily_best", "safe", "value"];
+const TYPE_ORDER = [
+  "safest",
+  "medium_risk",
+  "high_risk",
+  "mega_odds",
+  "odds_3_a",
+  "odds_3_b",
+  "odds_5_a",
+  "odds_5_b",
+  "daily_best",
+  "safe",
+  "value",
+];
 
 export function parlayTypeOrder(type: string): number {
   const i = TYPE_ORDER.indexOf(type);

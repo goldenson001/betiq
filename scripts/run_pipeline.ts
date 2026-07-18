@@ -2,7 +2,8 @@
  * Run the full pipeline for today (Brussels timezone):
  *   1. Scrape ESPN fixtures + attach prediction-site consensus
  *   2. Aggregate raw predictions into compound market predictions
- *   3. Build & persist parlays (safest / medium_risk / high_risk / mega_odds)
+ *   3. Build & persist parlays (8 tiers: safest / medium / high / mega /
+ *      odds_3_a / odds_3_b / odds_5_a / odds_5_b)
  *
  * Usage:
  *   npx tsx scripts/run_pipeline.ts            # today (Brussels)
@@ -35,13 +36,15 @@ async function main() {
     `[pipeline] Generated ${p.predictions} compound predictions across ${p.matches} matches`
   );
 
-  console.log(`[pipeline] Phase 4: building parlays (safest / medium / high / mega)...`);
+  console.log(`[pipeline] Phase 4: building 8 parlay tiers...`);
   const par = await buildAndPersistParlays(today);
+  const fmt = (name: string, cand: { legs: unknown[] } | null) =>
+    `${name}: ${cand?.legs.length ?? 0}`;
   console.log(
-    `[pipeline] Parlays -> safest: ${par.safest?.legs.length ?? 0} legs / ` +
-    `medium: ${par.mediumRisk?.legs.length ?? 0} legs / ` +
-    `high: ${par.highRisk?.legs.length ?? 0} legs / ` +
-    `mega: ${par.megaOdds?.legs.length ?? 0} legs`
+    `[pipeline] Parlays -> ${fmt("safest", par.safest)} / ${fmt("medium", par.mediumRisk)} / ` +
+    `${fmt("high", par.highRisk)} / ${fmt("mega", par.megaOdds)} / ` +
+    `${fmt("odds3A", par.odds3A)} / ${fmt("odds3B", par.odds3B)} / ` +
+    `${fmt("odds5A", par.odds5A)} / ${fmt("odds5B", par.odds5B)}`
   );
 
   console.log(`[pipeline] Done.`);

@@ -119,8 +119,20 @@ export interface DrawdownDecision {
  *   halted → normal:    winStreak ≥ DRAWDOWN_RECOVERY_WIN_DAYS (manual resume
  *                       recommended but auto-resume allowed for safety)
  *
- * Drawdown = (peakRoi - currentRoi) / max(peakRoi, 0.001)
- * — measured against rolling-7-day kellyRoi so it captures recent regime.
+ * Drawdown is measured as the fractional drop from peak cumulative ROI to
+ * current cumulative ROI. CAPPED AT 1.0 (100%) — you cannot lose more than
+ * your entire bankroll, so reported drawdowns > 100% are mathematically
+ * nonsensical and indicate a computation bug elsewhere (e.g. dividing by a
+ * near-zero peakRoi).
+ *
+ * Old (buggy) formula: (peakRoi - currentRoi) / max(peakRoi, 0.001)
+ *   — when peakRoi was tiny (e.g. 0.005 = 0.5%) and currentRoi was
+ *     strongly negative (e.g. -0.07 = -7%), this returned 13.0 = 1300%,
+ *     producing the impossible "Drawdown at 1493.3%" UI banner.
+ *
+ * New formula: max(0, peakRoi - currentRoi), capped at 1.0.
+ *   — Treats ROI drop as absolute bankroll fraction. A 5% peak → -7% current
+ *     = 12% drop, which is 0.12 (12%), not 1300%. Mathematically sound.
  */
 export function computeDrawdownState(ctx: DrawdownContext): DrawdownDecision {
   const {
@@ -131,9 +143,11 @@ export function computeDrawdownState(ctx: DrawdownContext): DrawdownDecision {
     previousState,
   } = ctx;
 
-  const drawdown = peakRoi > 0
-    ? Math.max(0, (peakRoi - currentRoi) / Math.max(0.001, peakRoi))
-    : 0;
+  // ── Drawdown = peak-to-current drop, capped at 100% ──────────────────────
+  // A peak ROI of +5% followed by current ROI of -7% means the bankroll has
+  // dropped 12% from its peak. That's a 0.12 drawdown. The old formula
+  // divided by peakRoi (a tiny number) producing absurd 1000%+ values.
+  const drawdown = Math.min(1.0, Math.max(0, peakRoi - currentRoi));
 
   // ── Recovery check (applies to degraded AND halted) ──────────────────────
   if (previousState !== "normal") {
