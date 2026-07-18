@@ -238,7 +238,7 @@ export function PerformanceDashboard({
         />
       </div>
 
-      {/* Advanced ML metrics — CLV, Kelly ROI, Brier */}
+      {/* Advanced ML metrics — CLV, Staking ROI, Brier */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <StatCard
           label="Closing Line Value"
@@ -260,14 +260,14 @@ export function PerformanceDashboard({
           }
         />
         <StatCard
-          label="Kelly ROI"
+          label="Staking ROI"
           value={aggregates.aggregateKellyRoi !== undefined ? `${(aggregates.aggregateKellyRoi * 100).toFixed(2)}%` : "—"}
           delta={
             aggregates.aggregateKellyRoi === undefined
               ? "Awaiting value bets"
               : aggregates.aggregateKellyRoi > 0
-                ? "Kelly staking profitable"
-                : "Kelly staking below breakeven"
+                ? "Recommended staking profitable"
+                : "Recommended staking below breakeven"
           }
           icon={Target}
           trend={

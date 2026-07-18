@@ -183,10 +183,10 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
           <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-blue-400/30 bg-blue-400/5 px-3 py-2 rounded-md">
             <div className="flex items-center gap-1.5">
               <span className="text-[9px] font-bold uppercase tracking-wider text-blue-950 bg-blue-300 px-1.5 py-0.5 rounded">
-                Kelly Stake
+                Recommended Stake
               </span>
               <span className="text-[10px] text-muted-foreground">
-                1/8 Kelly · capped at 2% bankroll
+                Capped at 2% bankroll
               </span>
             </div>
             <div className="text-sm font-mono font-bold text-blue-700 dark:text-blue-300">

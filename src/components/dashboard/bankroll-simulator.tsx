@@ -144,7 +144,7 @@ export function BankrollSimulator({
           </div>
           <div className="space-y-1">
             <Label htmlFor="kelly" className="text-xs text-muted-foreground">
-              Kelly Fraction: {kellyFraction}%
+              Stake Size: {kellyFraction}%
             </Label>
             <Slider
               id="kelly"
@@ -181,7 +181,7 @@ export function BankrollSimulator({
               {stats.projectedDailyPnl >= 0 ? "+" : "−"}€{Math.abs(stats.projectedDailyPnl).toFixed(2)}
             </div>
             <div className="text-[10px] text-muted-foreground">
-              avg kelly ROI {(stats.meanRoi * 100).toFixed(1)}%
+              avg staking ROI {(stats.meanRoi * 100).toFixed(1)}%
             </div>
           </div>
           <div className="rounded-md bg-muted/40 p-2">
@@ -210,7 +210,7 @@ export function BankrollSimulator({
         </div>
 
         <p className="text-[10px] text-muted-foreground italic">
-          Projections based on trailing-30-day Kelly ROI × your bankroll × selected Kelly fraction.
+          Projections based on trailing-30-day staking ROI × your bankroll × selected stake size.
           Drawdown estimate = 2σ × √30. Actual results may vary. Past performance is not indicative of future results.
         </p>
       </CardContent>

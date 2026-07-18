@@ -114,7 +114,7 @@ export function PredictionRow({ p, compact = false }: { p: PredictionView; compa
           {hasDisagreement && <DisagreementIndicator disagreement={p.disagreement!} />}
           {hasKelly && (
             <span className="text-[9px] font-bold uppercase tracking-wider text-blue-950 bg-blue-300 px-1 py-0.5 rounded">
-              KELLY {formatKelly(p.recommendedStake)}
+              STAKE {formatKelly(p.recommendedStake)}
             </span>
           )}
           {p.evaluated && p.correct !== null && p.correct !== undefined && (

@@ -458,7 +458,7 @@ export default function Home() {
               </strong>{" "}
               {statsQuery.data.riskGate.drawdownReason ?? "Stakes reduced for capital preservation."}
               {statsQuery.data.riskGate.drawdownState === "degraded" && (
-                <> Recommended stakes are running at 50% of full Kelly. </>
+                <> Recommended stakes are running at 50% of their normal size. </>
               )}
               {statsQuery.data.riskGate.drawdownState === "halted" && (
                 <> All recommended stakes are zeroed until the model recovers. </>
@@ -475,7 +475,7 @@ export default function Home() {
               <strong className="font-semibold">Portfolio cap engaged.</strong>{" "}
               Today&apos;s total exposure ({(statsQuery.data.riskGate.todayExposure * 100).toFixed(1)}%)
               exceeds the {(statsQuery.data.riskGate.maxExposure * 100).toFixed(0)}% daily cap.
-              All stakes scaled to {(statsQuery.data.riskGate.portfolioScale * 100).toFixed(0)}% of Kelly for
+              All stakes scaled to {(statsQuery.data.riskGate.portfolioScale * 100).toFixed(0)}% of their normal size for
               capital preservation.
             </div>
           </div>
@@ -785,7 +785,7 @@ export default function Home() {
                   <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
                     Safe High-Odds picks combine higher odds (1.50–2.50) with all safety
                     precautions: multi-source consensus (≥2), strong edge (≥4%), positive
-                    Kelly stake, and safe markets only (1X2, O/U 2.5/3.5, BTTS, Asian
+                    recommended stake, and safe markets only (1X2, O/U 2.5/3.5, BTTS, Asian
                     Handicap, Double Chance, Draw No Bet).
                   </p>
                   <p className="text-xs text-muted-foreground mt-2">
@@ -834,8 +834,8 @@ export default function Home() {
                   <p className="text-xs text-muted-foreground italic text-center pt-2">
                     Showing top {statsQuery.data.safeHighOddsPicks.length} investment-grade
                     picks with odds in 1.50–2.50 band for {date}. Each pick clears
-                    multi-source consensus, strong edge, positive Kelly, and safe-market
-                    checks — meaningful upside with all safety precautions intact.
+                    multi-source consensus, strong edge, a positive recommended stake,
+                    and safe-market checks — meaningful upside with all safety precautions intact.
                   </p>
                 </div>
               </>
