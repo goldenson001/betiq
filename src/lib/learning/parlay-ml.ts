@@ -106,25 +106,30 @@ export interface ParlayTierStatsRow {
 // Weights — tuned for SAFETY-FIRST parlays
 // ──────────────────────────────────────────────────────────────────────────────
 // These weights determine how much each ML signal contributes to the final
-// reliability score. They sum to 1.0. Calibrated probability dominates because
-// it's the strongest single predictor, but the other signals provide important
-// context that pure probability misses.
+// reliability score. They sum to 1.0.
 //
-// H2H agreement is now the SECOND-highest individual component (after prob)
-// because historical head-to-head matchups are the single most reliable
-// predictor of stylistic mismatches that form/elo miss. A 0.80 prob pick that
-// H2H actively contradicts (e.g. home side has lost 7 of last 10 to this
-// opponent) should be downweighted more than a 0.78 prob pick that H2H strongly
-// endorses.
+// Past H2H form is now the SINGLE LARGEST signal in the model — bigger than
+// calibrated probability itself — because the user's #1 directive is:
+// "ML must use past H2H form to make the safest decision." Historical head-to-
+// head matchups are the most reliable predictor of stylistic mismatches that
+// form/elo/raw probability miss.
+//
+// A 0.80 prob pick that H2H actively contradicts (e.g. home side has lost 7
+// of last 10 to this opponent) gets DRAMATICALLY downweighted — and on top
+// of the weight boost, the engine also applies a HARD H2H filter per tier
+// (see `minH2HAgreement` in buildGreedyParlayML / buildTargetOddsParlayML).
+// So H2H acts as BOTH a primary scoring signal AND a hard safety gate.
+//
+// Verified sum: 0.25 + 0.10 + 0.07 + 0.12 + 0.08 + 0.05 + 0.05 + 0.28 = 1.00
 export const ML_WEIGHTS = {
-  prob: 0.35,            // Calibrated probability — still the dominant signal
-  consensus: 0.13,       // Multi-source agreement
-  lowDisagreement: 0.09, // Sources agreeing on the probability
-  marketClv: 0.13,       // This combo historically beats the closing line
-  sourceBrier: 0.09,     // Sources with good recent calibration
+  prob: 0.25,            // Calibrated probability — 2nd-largest signal
+  consensus: 0.10,       // Multi-source agreement
+  lowDisagreement: 0.07, // Sources agreeing on the probability
+  marketClv: 0.12,       // This combo historically beats the closing line
+  sourceBrier: 0.08,     // Sources with good recent calibration
   sourceClv: 0.05,       // Sources that beat the closing line
   tierHistory: 0.05,     // Win rate of similar parlays historically
-  h2h: 0.11,             // Past head-to-head agreement — historical matchup signal
+  h2h: 0.28,             // Past H2H agreement — DOMINANT safety signal
 } as const;
 
 // ──────────────────────────────────────────────────────────────────────────────

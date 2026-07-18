@@ -238,10 +238,19 @@ function buildGreedyParlayML(
     minCombinedProb: number;
     minConsensus?: number;
     minReliability?: number; // ML reliability threshold (default 0 = no threshold)
+    /**
+     * HARD H2H safety gate. If set AND H2H data is available for a leg, the
+     * leg's H2H agreement score must be >= this value to be eligible.
+     * Legs WITHOUT H2H data are NOT penalized (they pass through) — we don't
+     * want to starve the safest tier when ESPN doesn't provide H2H for a
+     * fixture, only to FILTER OUT legs where H2H actively contradicts the pick.
+     */
+    minH2HAgreement?: number;
   }
 ): ParlayCandidate {
   const EXCLUDED = new Set(["bet_builder", "win_btts", "correct_score", "htft"]);
   const minRel = opts.minReliability ?? 0;
+  const minH2H = opts.minH2HAgreement;
 
   const eligible = allLegs
     .filter((l) => !EXCLUDED.has(l.market))
@@ -250,6 +259,16 @@ function buildGreedyParlayML(
     .filter((l) => {
       const ml = legMLMap.get(l.predictionId);
       return ml ? ml.reliability >= minRel : true;
+    })
+    // ── HARD H2H gate (B9): if H2H data is available and contradicts the
+    // pick (score < minH2HAgreement), EXCLUDE the leg entirely. Legs without
+    // H2H data pass through — we only filter when we have evidence the H2H
+    // disagrees with the prediction.
+    .filter((l) => {
+      if (minH2H === undefined) return true;
+      const ml = legMLMap.get(l.predictionId);
+      if (!ml || !ml.h2hBreakdown) return true; // no H2H data → don't penalize
+      return ml.h2hBreakdown.score >= minH2H;
     })
     // ── ML sort: reliability desc, tiebreak by prob*confidence desc ──────────
     .sort((a, b) => {
@@ -313,6 +332,10 @@ function buildTargetOddsParlayML(
     maxLegs?: number;
     minLegs?: number;
     minReliability?: number;
+    /**
+     * HARD H2H safety gate. See buildGreedyParlayML for semantics.
+     */
+    minH2HAgreement?: number;
   },
   usedMatchIds: Set<string>
 ): ParlayCandidate {
@@ -321,12 +344,13 @@ function buildTargetOddsParlayML(
   const maxLegs = opts.maxLegs ?? 8;
   const minLegs = opts.minLegs ?? 2;
   const minRel = opts.minReliability ?? 0;
+  const minH2H = opts.minH2HAgreement;
   const target = opts.targetOdds;
   const lowerBound = target * (1 - tolerance);
   const upperBound = target * (1 + tolerance);
 
   // Eligible legs: not excluded, not already used, prob >= minLegProb,
-  // ML reliability >= minReliability.
+  // ML reliability >= minReliability, H2H agreement >= minH2HAgreement (when data exists).
   // Sort by ML reliability desc (so we pick the safest legs first), with
   // tiebreak by odds desc (higher-odds legs get us to target faster).
   const eligible = allLegs
@@ -336,6 +360,13 @@ function buildTargetOddsParlayML(
     .filter((l) => {
       const ml = legMLMap.get(l.predictionId);
       return ml ? ml.reliability >= minRel : true;
+    })
+    // ── HARD H2H gate (B9): same semantics as in buildGreedyParlayML ──────
+    .filter((l) => {
+      if (minH2H === undefined) return true;
+      const ml = legMLMap.get(l.predictionId);
+      if (!ml || !ml.h2hBreakdown) return true;
+      return ml.h2hBreakdown.score >= minH2H;
     })
     .sort((a, b) => {
       const mlA = legMLMap.get(a.predictionId)?.reliability ?? 0;
@@ -738,7 +769,29 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   // uses B-grade (≥0.55), and high-risk / mega allow speculative legs.
   const usedMatchIds = new Set<string>();
 
-  const safest = buildGreedyParlayML(
+  // ── B9: Per-tier H2H safety gates ──────────────────────────────────────
+  // Each tier has a HARD minimum H2H agreement score. Legs whose H2H data
+  // actively contradicts the pick (score below threshold) are EXCLUDED from
+  // that tier — they can still appear in looser tiers, but never in the
+  // strictest tier for that risk band.
+  //
+  // H2H agreement score interpretation (see computeH2HAgreement in
+  // src/lib/prediction/h2h.ts):
+  //   ~0.85+  H2H strongly endorses the pick
+  //   ~0.65   H2H mildly endorses
+  //   ~0.50   H2H is neutral / mixed
+  //   ~0.40   H2H slightly contradicts
+  //   <0.35   H2H actively contradicts the pick
+  //
+  // Thresholds:
+  //   safest     ≥ 0.55 (H2H must mildly endorse — never pick against history)
+  //   medium_risk ≥ 0.45 (H2H must not contradict)
+  //   high_risk  ≥ 0.35 (H2H must not strongly contradict)
+  //   odds_3_a/b ≥ 0.50 (close-to-safe bands — H2H must be neutral or better)
+  //   odds_5_a/b ≥ 0.45 (same as medium_risk)
+  // Use `let` so the post-build RULE#1 dedup pass can reassign them after
+  // stripping any duplicate matchIds that may have leaked through.
+  let safest = buildGreedyParlayML(
     allLegs,
     legMLMap,
     {
@@ -747,27 +800,28 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
       minCombinedProb: 0.35,
       minConsensus: ENGINE_CONFIG.SAFEST_MIN_LEG_SOURCES,
       minReliability: 0.70, // A-grade legs only for the safest tier
+      minH2HAgreement: 0.55, // H2H must mildly endorse
     }
   );
   for (const leg of safest.legs) usedMatchIds.add(leg.matchId);
 
-  const mediumRisk = buildGreedyParlayML(
+  let mediumRisk = buildGreedyParlayML(
     allLegs.filter((l) => !usedMatchIds.has(l.matchId)),
     legMLMap,
-    { maxLegs: 4, minLegProb: 0.55, minCombinedProb: 0.08, minReliability: 0.55 }
+    { maxLegs: 4, minLegProb: 0.55, minCombinedProb: 0.08, minReliability: 0.55, minH2HAgreement: 0.45 }
   );
   for (const leg of mediumRisk.legs) usedMatchIds.add(leg.matchId);
 
-  const highRisk = buildGreedyParlayML(
+  let highRisk = buildGreedyParlayML(
     allLegs.filter((l) => !usedMatchIds.has(l.matchId)),
     legMLMap,
-    { maxLegs: 5, minLegProb: 0.40, minCombinedProb: 0.015, minReliability: 0.40 }
+    { maxLegs: 5, minLegProb: 0.40, minCombinedProb: 0.015, minReliability: 0.40, minH2HAgreement: 0.35 }
   );
   for (const leg of highRisk.legs) usedMatchIds.add(leg.matchId);
 
   // Mega-odds keeps its existing builder — it's about lottery-style payouts,
   // not safety, so ML scoring doesn't change which longshots we pick.
-  const megaOdds = buildMegaOddsParlay(
+  let megaOdds = buildMegaOddsParlay(
     allLegs.filter((l) => !usedMatchIds.has(l.matchId))
   );
   for (const leg of megaOdds.legs) usedMatchIds.add(leg.matchId);
@@ -775,40 +829,135 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   // ── B6: Target-odds parlays (user request) — now ML-driven ────────────────
   // Two parlays targeting combined odds of ~3.0, two targeting ~5.0.
   // Leg count doesn't matter — only that each leg is a high-probability pick
-  // (≥0.70 for odds_3, ≥0.60 for odds_5) AND ML reliability ≥ 0.65 / 0.55.
+  // (≥0.70 for odds_3, ≥0.60 for odds_5) AND ML reliability ≥ 0.65 / 0.55
+  // AND H2H agreement ≥ 0.50 / 0.45 (when H2H data is available).
   // These respect the no-overlap rule: odds_3_a picks first, then odds_3_b
   // (excluding A's matches), then odds_5_a, then odds_5_b.
-  const odds3A = buildTargetOddsParlayML(
+  let odds3A = buildTargetOddsParlayML(
     allLegs,
     legMLMap,
-    { targetOdds: 3.0, tolerance: 0.25, minLegProb: 0.70, maxLegs: 6, minLegs: 2, minReliability: 0.65 },
+    { targetOdds: 3.0, tolerance: 0.25, minLegProb: 0.70, maxLegs: 6, minLegs: 2, minReliability: 0.65, minH2HAgreement: 0.50 },
     usedMatchIds
   );
   for (const leg of odds3A.legs) usedMatchIds.add(leg.matchId);
 
-  const odds3B = buildTargetOddsParlayML(
+  let odds3B = buildTargetOddsParlayML(
     allLegs,
     legMLMap,
-    { targetOdds: 3.0, tolerance: 0.25, minLegProb: 0.70, maxLegs: 6, minLegs: 2, minReliability: 0.65 },
+    { targetOdds: 3.0, tolerance: 0.25, minLegProb: 0.70, maxLegs: 6, minLegs: 2, minReliability: 0.65, minH2HAgreement: 0.50 },
     usedMatchIds
   );
   for (const leg of odds3B.legs) usedMatchIds.add(leg.matchId);
 
-  const odds5A = buildTargetOddsParlayML(
+  let odds5A = buildTargetOddsParlayML(
     allLegs,
     legMLMap,
-    { targetOdds: 5.0, tolerance: 0.25, minLegProb: 0.60, maxLegs: 7, minLegs: 2, minReliability: 0.55 },
+    { targetOdds: 5.0, tolerance: 0.25, minLegProb: 0.60, maxLegs: 7, minLegs: 2, minReliability: 0.55, minH2HAgreement: 0.45 },
     usedMatchIds
   );
   for (const leg of odds5A.legs) usedMatchIds.add(leg.matchId);
 
-  const odds5B = buildTargetOddsParlayML(
+  let odds5B = buildTargetOddsParlayML(
     allLegs,
     legMLMap,
-    { targetOdds: 5.0, tolerance: 0.25, minLegProb: 0.60, maxLegs: 7, minLegs: 2, minReliability: 0.55 },
+    { targetOdds: 5.0, tolerance: 0.25, minLegProb: 0.60, maxLegs: 7, minLegs: 2, minReliability: 0.55, minH2HAgreement: 0.45 },
     usedMatchIds
   );
   for (const leg of odds5B.legs) usedMatchIds.add(leg.matchId);
+
+  // ── RULE #1 (USER MANDATE): NEVER repeat the same match across parlays ──
+  // The build order above (safest → medium → high → mega → odds_3_a → odds_3_b
+  // → odds_5_a → odds_5_b) already pre-filters `allLegs` to exclude matches
+  // claimed by earlier tiers. But we add a HARD defensive verification here
+  // that scans all 8 final parlays and removes any duplicate matchIds from
+  // LOWER-priority parlays (priority = build order). This guarantees the rule
+  // even if a future code change breaks the pre-filter, and it gives us an
+  // audit log when a duplicate is detected and removed.
+  //
+  // If a parlay loses legs due to this dedup, we re-evaluate its combined
+  // probability/odds/confidence using the surviving legs. If it ends up with
+  // fewer than 2 legs, the parlay is left as a single-leg "parlay" (still
+  // valid for UI display) — we don't promote legs up from lower tiers because
+  // that would require re-running the entire ML pipeline.
+  const parlayPriority = [
+    { key: "safest", candidate: safest },
+    { key: "medium_risk", candidate: mediumRisk },
+    { key: "high_risk", candidate: highRisk },
+    { key: "mega_odds", candidate: megaOdds },
+    { key: "odds_3_a", candidate: odds3A },
+    { key: "odds_3_b", candidate: odds3B },
+    { key: "odds_5_a", candidate: odds5A },
+    { key: "odds_5_b", candidate: odds5B },
+  ] as const;
+
+  const claimedMatchIds = new Set<string>();
+  // We mutate via reassignment using a mutable copy of the results object.
+  const results: Record<string, ParlayCandidate | null> = {
+    safest,
+    mediumRisk,
+    highRisk,
+    megaOdds,
+    odds3A,
+    odds3B,
+    odds5A,
+    odds5B,
+  };
+
+  for (const { key, candidate } of parlayPriority) {
+    if (!candidate || candidate.legs.length === 0) continue;
+
+    // Walk the legs in order; keep only legs whose matchId hasn't been claimed
+    // by a HIGHER-priority parlay.
+    const survivingLegs: ParlayLeg[] = [];
+    const survivingML: LegMLScore[] = [];
+    let dropped = 0;
+    for (let i = 0; i < candidate.legs.length; i++) {
+      const leg = candidate.legs[i];
+      if (claimedMatchIds.has(leg.matchId)) {
+        dropped++;
+        continue;
+      }
+      survivingLegs.push(leg);
+      if (candidate.legMLScores && candidate.legMLScores[i]) {
+        survivingML.push(candidate.legMLScores[i]);
+      }
+      claimedMatchIds.add(leg.matchId);
+    }
+
+    if (dropped > 0) {
+      // Some legs were dropped — re-evaluate the parlay with the surviving legs
+      let reeval: ParlayCandidate;
+      if (survivingLegs.length === 0) {
+        reeval = evaluateParlay([]);
+      } else if (survivingML.length === survivingLegs.length) {
+        reeval = evaluateParlayWithML(survivingLegs, survivingML);
+      } else {
+        reeval = evaluateParlay(survivingLegs);
+      }
+      // Preserve the dropped-count for audit (log only — don't persist)
+      console.warn(
+        `[parlays] RULE#1 dedup: tier=${key} dropped ${dropped} duplicate leg(s); ` +
+        `legs ${candidate.legs.length}→${survivingLegs.length}`
+      );
+      results[key] = reeval;
+    }
+  }
+
+  // Re-bind the (possibly modified) candidates so the persistence code below
+  // uses the deduped versions. We reassign the original `let` bindings so all
+  // downstream code (Kelly stake computation, DB persistence, return value)
+  // automatically picks up the deduped state. The non-null assertions are safe
+  // because the dedup loop above never replaces a non-null candidate with null
+  // — it only replaces with a re-evaluated ParlayCandidate (possibly empty, but
+  // never null).
+  safest = results.safest ?? safest;
+  mediumRisk = results.mediumRisk ?? mediumRisk;
+  highRisk = results.highRisk ?? highRisk;
+  megaOdds = results.megaOdds ?? megaOdds;
+  odds3A = results.odds3A ?? odds3A;
+  odds3B = results.odds3B ?? odds3B;
+  odds5A = results.odds5A ?? odds5A;
+  odds5B = results.odds5B ?? odds5B;
 
   // Clear existing parlays for this date (covers old "daily_best"/"safe"/"value" types too)
   await db.parlay.deleteMany({ where: { matchDate: dateStr } });
