@@ -31,6 +31,7 @@ import {
   Shield,
   Clock,
   AlertTriangle,
+  Activity,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MatchCard, type MatchView } from "@/components/dashboard/match-card";
@@ -322,6 +323,38 @@ export default function Home() {
     staleTime: 5 * 60_000,
   });
 
+  // ── Source health (D2) — tracks which scrapers are actually working ───────
+  interface SourceHealth {
+    name: string;
+    displayName: string;
+    url: string;
+    weight: number;
+    lastScrapedAt: string | null;
+    lastStatus: "success" | "failed" | "never";
+    lastError: string | null;
+    lastMatchesFound: number;
+    recentSuccessRate: number;
+    recentSamples: number;
+    isActive: boolean;
+    isHealthy: boolean;
+  }
+  interface SourcesStatusResponse {
+    ok: boolean;
+    totalSources: number;
+    activeSources: number;
+    healthySources: number;
+    sources: SourceHealth[];
+  }
+  const sourcesQuery = useQuery<SourcesStatusResponse>({
+    queryKey: ["sources-status"],
+    queryFn: async () => {
+      const r = await fetch(`/api/sources/status`);
+      if (!r.ok) throw new Error("Failed to load sources status");
+      return r.json() as Promise<SourcesStatusResponse>;
+    },
+    staleTime: 2 * 60_000,
+  });
+
   // ── Mutations ───────────────────────────────────────────────────────────
   const triggerPipeline = useMutation({
     mutationFn: async (phase: string) => {
@@ -601,6 +634,29 @@ export default function Home() {
                 <Badge variant="secondary" className="gap-1 text-xs border-emerald-400 text-emerald-700 dark:text-emerald-300">
                   <Shield className="h-3 w-3" />
                   {statsQuery.data.stats.safePicksCount} safe
+                </Badge>
+              )}
+              {/* D2: Source health badge — shows how many scrapers are actually returning data */}
+              {sourcesQuery.data && (
+                <Badge
+                  variant="secondary"
+                  className={
+                    "gap-1 text-xs " +
+                    (sourcesQuery.data.activeSources >= sourcesQuery.data.totalSources * 0.6
+                      ? "border-emerald-400 text-emerald-700 dark:text-emerald-300"
+                      : sourcesQuery.data.activeSources >= sourcesQuery.data.totalSources * 0.3
+                        ? "border-amber-400 text-amber-700 dark:text-amber-300"
+                        : "border-rose-400 text-rose-700 dark:text-rose-300")
+                  }
+                  title={
+                    sourcesQuery.data.sources
+                      .filter((s) => !s.isActive)
+                      .map((s) => `${s.displayName}: ${s.lastError ?? "no recent data"}`)
+                      .join("\n") || "All sources active"
+                  }
+                >
+                  <Activity className="h-3 w-3" />
+                  {sourcesQuery.data.activeSources}/{sourcesQuery.data.totalSources} sources
                 </Badge>
               )}
             </div>

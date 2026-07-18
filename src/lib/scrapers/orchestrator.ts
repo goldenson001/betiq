@@ -21,6 +21,9 @@ import { scrapeAdibet } from "./adibet";
 import { scrapeVitibet } from "./vitibet";
 import { scrapeSoccerstats } from "./soccerstats";
 import { scrapeFlashScore } from "./flashscore";
+// D2: Reliable API-based sources (no HTML scraping, no Cloudflare blocks)
+import { scrapeFootballData } from "./football-data";
+import { scrapeTheOddsApi } from "./the-odds-api";
 
 interface SourceDef {
   name: string;
@@ -109,28 +112,59 @@ const SOURCES: SourceDef[] = [
     providesFixtures: false,
     scrape: scrapeFlashScore,
   },
+  // ── D2: Reliable API-based sources (free tiers, real JSON APIs) ────────────
+  // These don't depend on HTML scraping, so they actually work reliably.
+  // Both require API keys (free tier available) — if the key isn't set, the
+  // scraper gracefully returns empty (no error), and the source still shows
+  // up in the dashboard with a "needs API key" status.
+  {
+    name: "football_data",
+    displayName: "football-data.org",
+    url: "https://www.football-data.org",
+    providesFixtures: true, // Real fixtures from JSON API
+    scrape: scrapeFootballData,
+  },
+  {
+    name: "the_odds_api",
+    displayName: "The Odds API",
+    url: "https://the-odds-api.com",
+    providesFixtures: true, // Real fixtures + multi-book odds
+    scrape: scrapeTheOddsApi,
+  },
 ];
 
 export async function ensureSources(): Promise<void> {
   for (const s of SOURCES) {
     const existing = await db.source.findUnique({ where: { name: s.name } });
+    // Starting weights:
+    //   - ESPN:              0.7 (canonical fixtures + odds + H2H + form)
+    //   - football-data.org: 0.5 (reliable API, real fixtures)
+    //   - the-odds-api:      0.6 (best odds data, multi-book aggregation)
+    //   - HTML scrapers:     0.3 (best-effort, often fail)
+    const startingWeight =
+      s.name === "espn" ? 0.7 :
+      s.name === "the_odds_api" ? 0.6 :
+      s.name === "football_data" ? 0.5 :
+      0.3;
     if (!existing) {
       await db.source.create({
         data: {
           name: s.name,
           displayName: s.displayName,
           url: s.url,
-          // ESPN gets a higher starting weight because it provides real odds
-          weight: s.name === "espn" ? 0.7 : 0.5,
+          weight: startingWeight,
         },
       });
     } else {
-      // Bump ESPN weight on existing installs
+      // Bump weights on existing installs for the reliable API-based sources
       if (s.name === "espn" && existing.weight < 0.6) {
-        await db.source.update({
-          where: { id: existing.id },
-          data: { weight: 0.7 },
-        });
+        await db.source.update({ where: { id: existing.id }, data: { weight: 0.7 } });
+      }
+      if (s.name === "the_odds_api" && existing.weight < 0.5) {
+        await db.source.update({ where: { id: existing.id }, data: { weight: 0.6 } });
+      }
+      if (s.name === "football_data" && existing.weight < 0.4) {
+        await db.source.update({ where: { id: existing.id }, data: { weight: 0.5 } });
       }
     }
   }
