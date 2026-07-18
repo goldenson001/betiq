@@ -172,7 +172,7 @@ function evaluateCardsOu(r: MatchResult, selection: string): boolean {
   return (sel === "over") === over;
 }
 
-function evaluatePrediction(
+export function evaluatePrediction(
   p: { market: string; selection: string },
   r: MatchResult,
   homeTeam?: string,

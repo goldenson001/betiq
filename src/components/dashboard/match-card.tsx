@@ -52,6 +52,8 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
     (a, b) => MARKET_ORDER.indexOf(a.market) - MARKET_ORDER.indexOf(b.market) || b.confidence - a.confidence
   );
   const hasResult = match.status === "finished" && match.homeScore !== null && match.awayScore !== null;
+  const isLive = match.status === "live" && match.homeScore !== null && match.awayScore !== null;
+  const hasScore = match.homeScore !== null && match.awayScore !== null;
   const avgConfidence =
     match.predictions.length > 0
       ? Math.round(match.predictions.reduce((s, p) => s + p.confidence, 0) / match.predictions.length)
@@ -82,6 +84,24 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
             {hasResult && (
               <Badge variant="secondary" className="text-[10px] font-semibold">
                 FT {match.homeScore}-{match.awayScore}
+              </Badge>
+            )}
+            {isLive && (
+              <Badge
+                variant="outline"
+                className="text-[10px] font-semibold border-rose-400 text-rose-600 dark:text-rose-300 gap-1"
+                title="Live — auto-refreshing"
+              >
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-rose-500"></span>
+                </span>
+                LIVE {match.homeScore}-{match.awayScore}
+              </Badge>
+            )}
+            {!hasResult && !isLive && hasScore && (
+              <Badge variant="outline" className="text-[10px] font-semibold">
+                {match.homeScore}-{match.awayScore}
               </Badge>
             )}
             <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -115,8 +135,11 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
               </div>
             )}
           </div>
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground px-1.5 py-0.5 bg-muted rounded font-semibold shrink-0">
-            v
+          <div className={
+            "text-[10px] uppercase tracking-wider text-muted-foreground px-1.5 py-0.5 rounded font-semibold shrink-0 " +
+            (hasScore ? "bg-rose-100 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300" : "bg-muted")
+          }>
+            {hasScore ? `${match.homeScore}-${match.awayScore}` : "v"}
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-sm font-bold truncate">{match.awayTeam}</div>

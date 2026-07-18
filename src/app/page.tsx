@@ -32,6 +32,7 @@ import {
   Clock,
   AlertTriangle,
   Activity,
+  Radio,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MatchCard, type MatchView } from "@/components/dashboard/match-card";
@@ -95,6 +96,65 @@ interface ParlaysResponse {
   ok: boolean;
   date: string;
   parlays: ParlayView[];
+}
+
+// ── Live scores auto-refresh ────────────────────────────────────────────────
+// Polled every 30s from /api/scores/live. Updates match scores in DB and
+// returns per-parlay per-leg live status. The UI merges this into the matches
+// and parlays queries via cache invalidation + direct state merge.
+interface ScoresLiveResponse {
+  ok: boolean;
+  date: string;
+  lastUpdated: string;
+  counts: {
+    total: number;
+    live: number;
+    finished: number;
+    scheduled: number;
+    postponed: number;
+    cancelled: number;
+  };
+  matches: Array<{
+    id: string;
+    externalId: string;
+    homeTeam: string;
+    awayTeam: string;
+    kickoffBrussels: string | null;
+    status: string;
+    homeScore: number | null;
+    awayScore: number | null;
+    htHomeScore: number | null;
+    htAwayScore: number | null;
+    leagueId: string | null;
+    leagueName: string | null;
+    leagueCountry: string | null;
+  }>;
+  parlays: Array<{
+    id: string;
+    type: string;
+    legsCount: number;
+    legsWon: number;
+    legsLost: number;
+    legsPending: number;
+    busted: boolean;
+    won: boolean;
+    hasLiveLeg: boolean;
+    legs: Array<{
+      predictionId: string;
+      matchId: string;
+      matchLabel: string;
+      market: string;
+      selection: string;
+      decided: boolean;
+      won: boolean;
+      pending: boolean;
+      matchStatus: string;
+      homeScore: number | null;
+      awayScore: number | null;
+    }>;
+  }>;
+  espnPolled: boolean;
+  error?: string;
 }
 
 interface PerformanceResponse {
@@ -233,6 +293,14 @@ export default function Home() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
 
+  // ── Live auto-refresh state ─────────────────────────────────────────────
+  // Default ON — users land on the dashboard with live scores already
+  // streaming. They can toggle it off in the header.
+  const [liveRefreshEnabled, setLiveRefreshEnabled] = useState(true);
+  const [liveData, setLiveData] = useState<ScoresLiveResponse | null>(null);
+  const [livePolling, setLivePolling] = useState(false);
+  const [lastLiveUpdate, setLastLiveUpdate] = useState<Date | null>(null);
+
   useEffect(() => setMounted(true), []);
 
   // ── Queries ─────────────────────────────────────────────────────────────
@@ -355,6 +423,43 @@ export default function Home() {
     staleTime: 2 * 60_000,
   });
 
+  // ── Live scores polling ────────────────────────────────────────────────
+  // Polls /api/scores/live every 30s when enabled. The endpoint fetches ESPN
+  // scoreboards for the current date, updates match scores/status in DB, and
+  // returns per-parlay per-leg live status. We then invalidate the matches/
+  // parlays/stats React Query caches so the UI re-renders with fresh scores.
+  const pollLiveScores = useCallback(async () => {
+    setLivePolling(true);
+    try {
+      const r = await fetch(`/api/scores/live?date=${date}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = (await r.json()) as ScoresLiveResponse;
+      setLiveData(data);
+      setLastLiveUpdate(new Date());
+      // Invalidate caches so matches/parlays/stats re-fetch with the new
+      // scores the server just persisted.
+      queryClient.invalidateQueries({ queryKey: ["matches", date] });
+      queryClient.invalidateQueries({ queryKey: ["parlays", date] });
+      queryClient.invalidateQueries({ queryKey: ["stats", date] });
+    } catch (err) {
+      // Silent fail — don't toast on every polling error (too noisy). Just
+      // log to console so devs can see what happened.
+      console.warn("[live-scores] poll failed:", (err as Error).message);
+    } finally {
+      setLivePolling(false);
+    }
+  }, [date, queryClient]);
+
+  // Set up the 30s interval. Also re-poll immediately when `date` changes so
+  // the user doesn't have to wait 30s to see live scores on the new date.
+  useEffect(() => {
+    if (!liveRefreshEnabled) return;
+    // Initial poll right away (also covers date change)
+    pollLiveScores();
+    const id = setInterval(pollLiveScores, 30_000);
+    return () => clearInterval(id);
+  }, [liveRefreshEnabled, date, pollLiveScores]);
+
   // ── Mutations ───────────────────────────────────────────────────────────
   const triggerPipeline = useMutation({
     mutationFn: async (phase: string) => {
@@ -424,6 +529,49 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-1.5 sm:gap-2">
+            {/* Live Auto-Refresh toggle — when ON, polls /api/scores/live every 30s */}
+            <Button
+              variant={liveRefreshEnabled ? "default" : "outline"}
+              size="sm"
+              onClick={() => {
+                setLiveRefreshEnabled((v) => !v);
+                if (liveRefreshEnabled) {
+                  toast.info("Live auto-refresh paused");
+                } else {
+                  toast.success("Live auto-refresh resumed — scores will update every 30s");
+                }
+              }}
+              className={
+                "gap-1.5 text-xs " +
+                (liveRefreshEnabled
+                  ? "bg-rose-600 hover:bg-rose-700 text-white border-rose-600"
+                  : "")
+              }
+              title={
+                liveRefreshEnabled
+                  ? `Live auto-refresh ON — polls ESPN every 30s. Last update: ${
+                      lastLiveUpdate ? lastLiveUpdate.toLocaleTimeString() : "never"
+                    }`
+                  : "Live auto-refresh OFF — click to resume"
+              }
+            >
+              {livePolling ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Radio className={"h-3.5 w-3.5 " + (liveRefreshEnabled ? "animate-pulse" : "")} />
+              )}
+              <span className="hidden md:inline">
+                {liveRefreshEnabled ? "Live" : "Paused"}
+              </span>
+              {liveRefreshEnabled && liveData && liveData.counts.live > 0 && (
+                <Badge
+                  variant="secondary"
+                  className="ml-1 h-4 px-1 text-[9px] font-bold bg-white/20 text-white border-white/30"
+                >
+                  {liveData.counts.live}
+                </Badge>
+              )}
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -466,6 +614,52 @@ export default function Home() {
             finder, and self-learning feedback loop all run end-to-end on the resulting data.
           </div>
         </div>
+
+        {/* Live scores status banner — shows when auto-refresh is ON */}
+        {liveRefreshEnabled && liveData && (
+          <div className={
+            "rounded-lg border px-3 py-2 text-xs flex items-center justify-between gap-3 flex-wrap " +
+            (liveData.counts.live > 0
+              ? "border-rose-400/60 bg-rose-500/10"
+              : "border-slate-300/40 bg-slate-100/40 dark:bg-slate-900/30")
+          }>
+            <div className="flex items-center gap-2">
+              {liveData.counts.live > 0 ? (
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                </span>
+              ) : (
+                <Radio className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              )}
+              <div className={
+                liveData.counts.live > 0
+                  ? "text-rose-900 dark:text-rose-200"
+                  : "text-muted-foreground"
+              }>
+                {liveData.counts.live > 0 ? (
+                  <>
+                    <strong className="font-semibold">{liveData.counts.live} match{liveData.counts.live === 1 ? "" : "es"} live</strong>
+                    {" · "}
+                    {liveData.counts.finished} finished · {liveData.counts.scheduled} scheduled
+                  </>
+                ) : (
+                  <>
+                    <strong className="font-semibold">Auto-refresh active.</strong>{" "}
+                    No matches currently in play. Scores will refresh every 30s once kick-off begins.
+                    {" · "}
+                    {liveData.counts.finished} finished · {liveData.counts.scheduled} scheduled today
+                  </>
+                )}
+              </div>
+            </div>
+            <div className="text-[10px] text-muted-foreground flex items-center gap-1.5 font-mono">
+              <Clock className="h-3 w-3" />
+              {lastLiveUpdate ? `Updated ${lastLiveUpdate.toLocaleTimeString()}` : "Pending…"}
+              {livePolling && <Loader2 className="h-3 w-3 animate-spin" />}
+            </div>
+          </div>
+        )}
 
         {/* C3: Drawdown / risk-gate banner — appears when drawdownState != normal */}
         {statsQuery.data?.riskGate && statsQuery.data.riskGate.drawdownState !== "normal" && (
@@ -818,9 +1012,39 @@ export default function Home() {
                 {parlaysQuery.data.parlays
                   .slice()
                   .sort((a, b) => parlayTypeOrder(a.type) - parlayTypeOrder(b.type))
-                  .map((p) => (
-                    <ParlayCard key={p.id} parlay={p} />
-                  ))}
+                  .map((p) => {
+                    // Merge live parlay status (leg-by-leg W/L/pending + bust flag)
+                    // from /api/scores/live into the parlay view. Falls back to
+                    // undefined if live data isn't available yet.
+                    const liveP = liveData?.parlays.find((lp) => lp.id === p.id);
+                    const merged: ParlayView = liveP
+                      ? {
+                          ...p,
+                          live: {
+                            legsWon: liveP.legsWon,
+                            legsLost: liveP.legsLost,
+                            legsPending: liveP.legsPending,
+                            busted: liveP.busted,
+                            won: liveP.won,
+                            hasLiveLeg: liveP.hasLiveLeg,
+                            legs: Object.fromEntries(
+                              liveP.legs.map((l) => [
+                                l.predictionId,
+                                {
+                                  decided: l.decided,
+                                  won: l.won,
+                                  pending: l.pending,
+                                  matchStatus: l.matchStatus,
+                                  homeScore: l.homeScore,
+                                  awayScore: l.awayScore,
+                                },
+                              ])
+                            ),
+                          },
+                        }
+                      : p;
+                    return <ParlayCard key={p.id} parlay={merged} />;
+                  })}
               </div>
             )}
           </TabsContent>
