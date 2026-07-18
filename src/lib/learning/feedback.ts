@@ -562,6 +562,10 @@ export async function processResultsForDate(dateStr: string): Promise<{
 
   // Evaluate parlays
   const parlays = await db.parlay.findMany({ where: { matchDate: dateStr, evaluated: false } });
+  // Collect settlement outcomes as we evaluate each parlay — we'll pass
+  // these to the stake ledger so it can settle the corresponding stake rows
+  // (computing actual return + realized ROI).
+  const settlementOutcomes: Array<{ parlayId: string; won: boolean; legsWon: number; legsLost: number; legsVoid: number }> = [];
   for (const parlay of parlays) {
     const legs = JSON.parse(parlay.legsJson) as Array<{
       matchId: string;
@@ -573,6 +577,7 @@ export async function processResultsForDate(dateStr: string): Promise<{
     let anyLost = false;
     let pendingLegs = 0;
     let legsWon = 0;
+    let legsVoid = 0;
     for (const leg of legs) {
       const legMatch = await db.match.findUnique({ where: { id: leg.matchId } });
       // ── Don't settle a parlay until ALL legs have final scores ──────────
@@ -583,6 +588,12 @@ export async function processResultsForDate(dateStr: string): Promise<{
       // (b) never got re-evaluated once the remaining legs finished.
       if (!legMatch || legMatch.homeScore === null || legMatch.awayScore === null) {
         pendingLegs++;
+        continue;
+      }
+      // Void detection — postponed / abandoned matches get status "postponed"
+      // or "abandoned". We treat these legs as void (refunded), not losses.
+      if (legMatch.status === "postponed" || legMatch.status === "abandoned" || legMatch.status === "void") {
+        legsVoid++;
         continue;
       }
       const r: MatchResult = {
@@ -610,10 +621,24 @@ export async function processResultsForDate(dateStr: string): Promise<{
       // legs are settled so the `won` flag is final, not provisional.
       continue;
     }
-    const parlayWon = anyLost ? false : allWon;
+    const legsLost = legs.length - legsWon - legsVoid;
+    // A parlay "won" only if ALL non-void legs won AND there was at least one
+    // non-void leg. If all legs voided, the parlay is void (refunded).
+    const parlayWon = legsVoid === legs.length
+      ? false // all-void → treat as void (not won, not lost — ledger will refund)
+      : !anyLost && allWon && legsWon > 0;
     await db.parlay.update({
       where: { id: parlay.id },
       data: { evaluated: true, won: parlayWon },
+    });
+
+    // Track settlement outcome for the stake ledger
+    settlementOutcomes.push({
+      parlayId: parlay.id,
+      won: parlayWon,
+      legsWon,
+      legsLost,
+      legsVoid,
     });
 
     // ── ML: update per-tier historical stats so the next parlay build can ──
@@ -634,6 +659,77 @@ export async function processResultsForDate(dateStr: string): Promise<{
     } catch (err) {
       console.warn("[feedback] ParlayTierStats update failed:", err);
     }
+  }
+
+  // ── Settle stake ledger rows + update bankroll snapshot ────────────────────
+  // After all parlays for this date have been evaluated, we:
+  //   1. Settle the corresponding StakeLedger rows (compute actualReturn +
+  //      realizedRoi based on the parlay outcome).
+  //   2. Settle the corresponding PickAudit rows (backfill won/lost/return
+  //      so audit records carry complete lifecycle data).
+  //   3. Snapshot the bankroll — computes today's P&L, updates bankroll +
+  //      peak + drawdown state, persists a BankrollSnapshot row.
+  //
+  // These three steps make the system end-to-end auditable: every
+  // recommendation → placement → settlement → bankroll impact is recorded.
+  if (settlementOutcomes.length > 0) {
+    try {
+      const { settleStakesForDate } = await import("@/lib/audit/stake-ledger");
+      await settleStakesForDate(dateStr, settlementOutcomes);
+    } catch (err) {
+      console.warn("[feedback] StakeLedger settlement failed:", err);
+    }
+
+    // Backfill PickAudit rows with settlement outcomes.
+    try {
+      const { settlePickAudit } = await import("@/lib/audit/pick-audit");
+      for (const outcome of settlementOutcomes) {
+        // Need actualReturn + realizedRoi for the audit row. We reconstruct
+        // from the stake ledger (which already has the monetary values).
+        // For simplicity, we just mark won/legsWon/legsLost/legsVoid here —
+        // the stake ledger is the source of truth for monetary values.
+        await settlePickAudit(outcome.parlayId, {
+          won: outcome.won,
+          legsWon: outcome.legsWon,
+          legsLost: outcome.legsLost,
+          legsVoid: outcome.legsVoid,
+          actualReturn: 0, // populated below from stake ledger if available
+          realizedRoi: 0,
+        }).catch(() => { /* non-fatal — audit row may not exist */ });
+
+        // Best-effort: copy actualReturn + realizedRoi from stake ledger
+        try {
+          const stake = await db.stakeLedger.findFirst({
+            where: { parlayId: outcome.parlayId },
+            orderBy: { createdAt: "desc" },
+            select: { actualReturn: true, realizedRoi: true, stakeAmount: true },
+          });
+          if (stake && (stake.actualReturn !== null || stake.realizedRoi !== null)) {
+            await db.pickAudit.updateMany({
+              where: { parlayId: outcome.parlayId, settledAt: { not: null } },
+              data: {
+                actualReturn: stake.actualReturn,
+                realizedRoi: stake.realizedRoi,
+              },
+            });
+          }
+        } catch {
+          // non-fatal — best-effort enrichment
+        }
+      }
+    } catch (err) {
+      console.warn("[feedback] PickAudit settlement failed:", err);
+    }
+  }
+
+  // ── Bankroll snapshot — always run, even if no parlays settled today ──────
+  // This captures the day's P&L (0 if nothing settled) and updates streaks +
+  // drawdown state. Idempotent — safe to call multiple times per date.
+  try {
+    const { snapshotBankroll } = await import("@/lib/audit/bankroll");
+    await snapshotBankroll(dateStr);
+  } catch (err) {
+    console.warn("[feedback] BankrollSnapshot failed:", err);
   }
 
   // Compute daily performance snapshot (with Brier, Kelly ROI, CLV)

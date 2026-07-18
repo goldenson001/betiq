@@ -57,6 +57,9 @@ import {
   type SourceMLInfo,
 } from "@/lib/learning/parlay-ml";
 import { loadMarketLeagueClvMap } from "@/lib/learning/feedback";
+import { writePickAudit } from "@/lib/audit/pick-audit";
+import { recordStakeRecommendations, type StakeRecommendation } from "@/lib/audit/stake-ledger";
+import { getBankrollState } from "@/lib/audit/bankroll";
 
 interface ParlayLeg {
   predictionId: string;
@@ -1020,6 +1023,17 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
     { type: "odds_5_b", cand: odds5B, k: odds5BBK.kelly, adjustedProb: odds5BBK.adjustedProb, sampleCount: odds5BBK.sampleCount },
   ];
 
+  // ── Load current bankroll state — needed to compute monetary stake amounts
+  // for the stake ledger. The bankroll state also drives the drawdown
+  // multiplier that's applied to every Kelly stake before persistence.
+  const bankrollState = await getBankrollState();
+  const bankrollAtTime = bankrollState.bankroll;
+  const drawdownStateStr = bankrollState.drawdownState;
+
+  // Build the list of stake recommendations as we persist each parlay — we
+  // batch-write them to the StakeLedger after the parlay loop completes.
+  const stakeRecommendations: StakeRecommendation[] = [];
+
   for (const tier of tiers) {
     if (tier.cand.legs.length === 0) continue;
     // Build the ML components JSON for UI display + audit. Each leg's
@@ -1043,7 +1057,15 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         })
       : null;
 
-    await db.parlay.create({
+    // ── Apply drawdown multiplier to the Kelly stake before persistence ────
+    // The risk gate (computeDrawdownState) returns a multiplier: 1.0 normal,
+    // 0.5 degraded, 0.0 halted. We multiply the recommended stake by this
+    // factor so the UI shows the ACTUAL stake the user should place, not the
+    // theoretical full Kelly.
+    const rawStake = tier.k.recommendedStake;
+    const adjustedStake = rawStake * bankrollState.stakeMultiplier;
+
+    const created = await db.parlay.create({
       data: {
         matchDate: dateStr,
         type: tier.type,
@@ -1054,7 +1076,7 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         confidence: tier.cand.confidence,
         expectedValue: tier.cand.expectedValue,
         kellyFraction: tier.k.fullKelly,
-        recommendedStake: tier.k.recommendedStake,
+        recommendedStake: adjustedStake,
         // ── ML fields ──────────────────────────────────────────────────────
         mlScore: tier.cand.mlScore ?? null,
         mlComponentsJson,
@@ -1062,6 +1084,54 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         mlSampleCount: tier.sampleCount,
       },
     });
+
+    // ── Write immutable audit record ────────────────────────────────────────
+    // Captures the FULL decision context (legs, ML components, H2H, Kelly,
+    // risk state) at the moment of recommendation. Survives parlay wipes.
+    try {
+      await writePickAudit({
+        parlayId: created.id,
+        matchDate: dateStr,
+        tier: tier.type,
+        cand: tier.cand,
+        adjustedProb: tier.adjustedProb,
+        sampleCount: tier.sampleCount,
+        kellyFraction: tier.k.fullKelly,
+        recommendedStake: adjustedStake,
+        drawdownState: drawdownStateStr,
+        portfolioScale: null, // portfolio cap is applied per-pick, not per-parlay
+      });
+    } catch (err) {
+      // Audit write failure is non-fatal — log and continue. The parlay row
+      // is already persisted; the audit row is a post-hoc record only.
+      console.error(`[audit] writePickAudit failed for tier=${tier.type}`, err);
+    }
+
+    // ── Queue stake recommendation for the ledger ───────────────────────────
+    // Only record if the adjusted stake is positive (halted state → 0 stake
+    // → no ledger row). The ledger row links back to the parlay + audit row
+    // so the feedback loop can settle it after matches finish.
+    if (adjustedStake > 0) {
+      stakeRecommendations.push({
+        parlayId: created.id,
+        matchDate: dateStr,
+        tier: tier.type,
+        recommendedStake: adjustedStake,
+        combinedOdds: tier.cand.combinedOdds,
+        drawdownState: drawdownStateStr,
+        portfolioScale: null,
+      });
+    }
+  }
+
+  // ── Batch-write stake recommendations to the StakeLedger ──────────────────
+  // This creates one ledger row per parlay with positive Kelly stake. The
+  // feedback loop will settle these rows after matches finish, computing
+  // realized ROI and updating the bankroll snapshot.
+  try {
+    await recordStakeRecommendations(stakeRecommendations, bankrollAtTime);
+  } catch (err) {
+    console.error(`[audit] recordStakeRecommendations failed for ${dateStr}`, err);
   }
 
   return { safest, mediumRisk, highRisk, megaOdds, odds3A, odds3B, odds5A, odds5B };

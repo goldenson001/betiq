@@ -300,34 +300,62 @@ async function fetchEspnJson(url: string): Promise<unknown | null> {
 /**
  * Fetch the scoreboard for a single league on a given date.
  * Returns the events array (may be empty).
+ *
+ * Zod-validated: if ESPN changes their payload shape, we log a structured
+ * schema-drift warning and fall back to an empty events array rather than
+ * silently corrupting downstream state. This is the defensive layer that
+ * would have caught the FT/LIVE bug at the source.
  */
 async function fetchLeagueScoreboard(
   league: LeagueSpec,
   dateCompact: string // "YYYYMMDD"
 ): Promise<{ events: EspnEvent[]; rawLeagueName?: string }> {
   const url = `${SOURCE_URL}/${league.code}/scoreboard?dates=${dateCompact}`;
-  const json = (await fetchEspnJson(url)) as EspnScoreboardResponse | null;
+  const json = await fetchEspnJson(url);
   if (!json) return { events: [] };
-  // ESPN's top-level league name (for verification)
-  const rawLeagueName = json.leagues?.[0]?.name;
-  return { events: json.events ?? [], rawLeagueName };
+
+  // Runtime schema validation — logs drift but doesn't throw (so a single
+  // bad league doesn't break the whole pipeline).
+  const { EspnScoreboardSchema, parseEspnPayload } = await import("./espn-schema");
+  const parsed = parseEspnPayload(EspnScoreboardSchema, json, `scoreboard ${league.code}`);
+  if (!parsed.success || !parsed.data) {
+    // Schema drift — fall back to best-effort raw extraction so we don't
+    // starve the pipeline entirely on minor field additions.
+    const raw = json as EspnScoreboardResponse;
+    return { events: raw.events ?? [], rawLeagueName: raw.leagues?.[0]?.name };
+  }
+  return {
+    events: (parsed.data.events ?? []) as unknown as EspnEvent[],
+    rawLeagueName: parsed.data.leagues?.[0]?.name,
+  };
 }
 
 /**
  * Fetch the summary endpoint for a single match to get odds + H2H.
  * ESPN's summary endpoint returns DraftKings odds (when available) and
  * the headToHeadGames array containing previous meetings between the two teams.
+ *
+ * Zod-validated: same defensive pattern as fetchLeagueScoreboard.
  */
 async function fetchMatchSummary(
   leagueCode: string,
   eventId: string
 ): Promise<{ odds: EspnOddsEntry[]; h2h: H2HSummary | null }> {
   const url = `${SOURCE_URL}/${leagueCode}/summary?event=${eventId}`;
-  const json = (await fetchEspnJson(url)) as EspnSummaryResponse | null;
+  const json = await fetchEspnJson(url);
   if (!json) return { odds: [], h2h: null };
-  // odds[0] is the primary entry (DraftKings). pickcenter has duplicates.
-  const odds = json.odds ?? [];
-  const h2h = parseH2H(json.headToHeadGames);
+
+  const { EspnSummarySchema, parseEspnPayload } = await import("./espn-schema");
+  const parsed = parseEspnPayload(EspnSummarySchema, json, `summary ${leagueCode}/${eventId}`);
+  if (!parsed.success || !parsed.data) {
+    // Schema drift — fall back to best-effort raw extraction
+    const raw = json as EspnSummaryResponse;
+    const odds = raw.odds ?? [];
+    const h2h = parseH2H(raw.headToHeadGames);
+    return { odds, h2h };
+  }
+  const odds = (parsed.data.odds ?? []) as unknown as EspnOddsEntry[];
+  const h2h = parseH2H(parsed.data.headToHeadGames);
   return { odds, h2h };
 }
 

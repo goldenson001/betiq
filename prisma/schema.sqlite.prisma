@@ -245,9 +245,31 @@ model Parlay {
   recommendedStake Float?
   evaluated   Boolean  @default(false)
   won         Boolean?
+  // ── ML-driven parlay selection signals ─────────────────────────────────────
+  mlScore         Float?
+  mlComponentsJson String?
+  mlAdjustedProbability Float?
+  mlSampleCount   Int?
   createdAt   DateTime @default(now())
 
   @@index([matchDate, type])
+}
+
+// ── ML parlay tier statistics ──────────────────────────────────────────────
+// Per-tier (safest, medium_risk, odds_3_a, etc.) rolling stats used by the
+// Bayesian shrinkage that adjusts combined probabilities. Updated by the
+// feedback loop after each parlay settles.
+model ParlayTierStats {
+  id          String   @id @default(cuid())
+  tier        String   @unique
+  totalParlays    Int   @default(0)
+  wonParlays      Int   @default(0)
+  totalLegs       Int   @default(0)
+  wonLegs         Int   @default(0)
+  rollingWinRate  Float @default(0)
+  lifetimeWinRate Float @default(0)
+  recentResultsJson String?
+  updatedAt   DateTime @updatedAt
 }
 
 model PerformanceSnapshot {
@@ -287,4 +309,132 @@ model ScrapeLog {
   status      String   @default("running")
   error       String?
   createdAt   DateTime @default(now())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// REAL-MONEY STAKING LAYER (production-grade accountability)
+// ──────────────────────────────────────────────────────────────────────────────
+// Three immutable tables that make the system auditable end-to-end:
+//
+//   PickAudit        — One row per parlay EVER built. Frozen snapshot of every
+//                      signal that fed the decision (ML components, H2H score,
+//                      Kelly stake, build version, etc.). Even after the parlay
+//                      row is wiped on the next pipeline run, the audit row
+//                      survives so we can post-mortem losing days.
+//
+//   StakeLedger      — One row per parlay that carried a positive Kelly stake.
+//                      Tracks the lifecycle: recommended → placed → settled.
+//                      Settled rows carry actual return + realized ROI so we
+//                      can compute bankroll P&L and per-tier realized ROI
+//                      (separate from the theoretical combinedProbability).
+//
+//   BankrollSnapshot — Daily snapshot of bankroll state: current balance, peak,
+//                      drawdown %, drawdown state (normal/degraded/halted),
+//                      total staked today, total returned today. Used to drive
+//                      the risk gate UI and to audit drawdown transitions.
+// ──────────────────────────────────────────────────────────────────────────────
+
+model PickAudit {
+  id              String   @id @default(cuid())
+  // Foreign key to Parlay (kept loose — parlay rows get wiped on re-run, audit
+  // rows persist forever).
+  parlayId        String
+  matchDate       String
+  tier            String
+  // ── Frozen pick data ────────────────────────────────────────────────────────
+  legsJson        String   // snapshot of legs at recommendation time
+  legsCount       Int
+  combinedProbability Float
+  combinedOdds    Float
+  // ── ML signals snapshot (what drove the decision) ───────────────────────────
+  mlScore         Float?
+  mlComponentsJson String? // per-leg reliability + 8-component breakdown
+  mlAdjustedProbability Float?
+  mlSampleCount   Int?
+  // ── H2H snapshot (specifically — user's #1 safety signal) ───────────────────
+  h2hSummaryJson  String?  // per-leg H2H agreement scores
+  // ── Kelly stake at recommendation time ──────────────────────────────────────
+  kellyFraction   Float?
+  recommendedStake Float?
+  // ── Schema version for forward-compat ───────────────────────────────────────
+  schemaVersion   Int      @default(1)
+  // ── Settlement (filled by feedback loop when match finishes) ────────────────
+  settledAt       DateTime?
+  won             Boolean?
+  legsWon         Int?
+  legsLost        Int?
+  legsVoid        Int?
+  actualReturn    Float?   // stake × combinedOdds if won, 0 if lost, void rules
+  realizedRoi     Float?   // (actualReturn - stake) / stake
+  // ── Notes — freeform for manual annotation post-mortem ──────────────────────
+  notes           String?
+  createdAt       DateTime @default(now())
+
+  @@index([matchDate, tier])
+  @@index([parlayId])
+  @@index([settledAt])
+  @@index([won])
+}
+
+model StakeLedger {
+  id              String   @id @default(cuid())
+  parlayId        String
+  pickAuditId     String?  // link to immutable audit record
+  matchDate       String
+  tier            String
+  // ── Stake details ───────────────────────────────────────────────────────────
+  recommendedStake Float   // fraction of bankroll [0, 1]
+  bankrollAtTime   Float   // bankroll used to compute monetary stake
+  stakeAmount      Float   // recommendedStake × bankrollAtTime (monetary)
+  combinedOdds     Float
+  // ── Lifecycle ───────────────────────────────────────────────────────────────
+  // recommended: just computed, not yet placed
+  // placed:      user marked as actually bet
+  // settled:     match finished, return recorded
+  // void:        match voided / postponed / abandoned
+  // skipped:     user chose not to place (recorded for compliance audit)
+  status          String   @default("recommended")
+  placedAt        DateTime?
+  settledAt       DateTime?
+  // ── Outcome ─────────────────────────────────────────────────────────────────
+  won             Boolean?
+  actualReturn    Float?   // monetary units returned (0 if lost, stake×odds if won)
+  realizedRoi     Float?   // (actualReturn - stakeAmount) / stakeAmount
+  // ── Risk context at placement time ──────────────────────────────────────────
+  drawdownState   String?  // normal | degraded | halted
+  portfolioScale  Float?   // portfolio-cap scale factor applied (1.0 = no scaling)
+  // ── Notes ───────────────────────────────────────────────────────────────────
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([matchDate, tier])
+  @@index([status])
+  @@index([parlayId])
+}
+
+model BankrollSnapshot {
+  id              String   @id @default(cuid())
+  date            String   @unique  // YYYY-MM-DD (Brussels tz)
+  // ── Balance ─────────────────────────────────────────────────────────────────
+  bankroll        Float              // current bankroll at end of day
+  peakBankroll    Float              // all-time peak (for drawdown computation)
+  drawdownPct     Float   @default(0) // (peak - current) / peak, capped [0, 1]
+  // ── Risk state ──────────────────────────────────────────────────────────────
+  drawdownState   String  @default("normal") // normal | degraded | halted
+  // ── Today's activity ────────────────────────────────────────────────────────
+  totalStaked     Float   @default(0)
+  totalReturned   Float   @default(0)
+  totalProfit     Float   @default(0)  // totalReturned - totalStaked
+  parlaysPlaced   Int     @default(0)
+  parlaysWon      Int     @default(0)
+  parlaysLost     Int     @default(0)
+  parlaysPending  Int     @default(0)
+  // ── Streaks (carried forward) ───────────────────────────────────────────────
+  winStreak       Int     @default(0)
+  loseStreak      Int     @default(0)
+  // ── Notes ───────────────────────────────────────────────────────────────────
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }
