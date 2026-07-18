@@ -144,9 +144,8 @@ export async function scrapeFootballData(targetDate?: string): Promise<ScrapeRes
             away: iAway / sum,
           };
           // Pick = highest implied probability
-          if (probilitiesMax(probabilities) === "home") pick1X2 = "1";
-          else if (probilitiesMax(probabilities) === "away") pick1X2 = "2";
-          else pick1X2 = "X";
+          const maxOutcome = probabilitiesMax(probabilities);
+          pick1X2 = maxOutcome === "home" ? "1" : maxOutcome === "away" ? "2" : "X";
         } else if (m.status === "FINISHED" && m.score?.fullTime) {
           // Post-match: derive pick from final score (for backtesting/historical)
           const h = m.score.fullTime.home ?? 0;
@@ -192,7 +191,7 @@ export async function scrapeFootballData(targetDate?: string): Promise<ScrapeRes
   }
 }
 
-function probilitiesMax(p: { home?: number; draw?: number; away?: number }): "home" | "draw" | "away" {
+function probabilitiesMax(p: { home?: number; draw?: number; away?: number }): "home" | "draw" | "away" {
   const h = p.home ?? 0;
   const d = p.draw ?? 0;
   const a = p.away ?? 0;
