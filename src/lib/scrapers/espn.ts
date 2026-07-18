@@ -829,14 +829,60 @@ export async function fetchEspnResults(
       const awayTeam = normalizeTeam(awayC?.team?.displayName ?? "");
       if (!homeTeam || !awayTeam) continue;
 
-      const homeScore = homeC?.score ? parseInt(homeC.score, 10) : null;
-      const awayScore = awayC?.score ? parseInt(awayC.score, 10) : null;
+      // ── Robust score parsing ──────────────────────────────────────────────
+      // ESPN returns score as a STRING in most responses ("0", "1", "2"...),
+      // but in some edge cases (e.g. in-progress matches with no score yet)
+      // it can be undefined, null, or empty. Older code used a truthy check
+      // (`homeC?.score ? parseInt(...) : null`), which is INCORRECT for the
+      // string "0" because "0" is truthy (good) — but if ESPN ever returns a
+      // numeric 0, JS would treat it as falsy (bug). Use explicit null/empty
+      // checks so both "0" (string) and 0 (number) are parsed correctly.
+      const homeScoreRaw = homeC?.score;
+      const awayScoreRaw = awayC?.score;
+      const parseScore = (raw: unknown): number | null => {
+        if (raw === null || raw === undefined || raw === "") return null;
+        const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+        return Number.isFinite(n) ? n : null;
+      };
+      const homeScore = parseScore(homeScoreRaw);
+      const awayScore = parseScore(awayScoreRaw);
 
+      // ── Status mapping (fixed for in-progress matches showing as FT) ──────
+      // ESPN's `status.type.state` is the canonical signal:
+      //   "pre"  = scheduled (not started)
+      //   "in"   = in progress (live — including HT, extra time, penalties)
+      //   "post" = finished (full-time, including any extra time/penalties)
+      //
+      // `status.type.completed` is a separate boolean that ESPN sometimes
+      // flips to `true` prematurely during in-progress matches (known ESPN
+      // quirk — particularly during the brief window between full-time and
+      // the start of extra time in knockout games). The old code used
+      //   `else if (state === "post" || completed) status = "finished"`
+      // which would mark in-progress matches as "finished" whenever
+      // `completed === true` (even with state="in"). This caused the UI to
+      // show "FT 0-0" while the match was still being played.
+      //
+      // Fix: "live" wins over "finished" — if state === "in", the match is
+      // live regardless of what `completed` says. Only set "finished" when
+      // state === "post" (or state is unknown but completed is true AND
+      // we're definitely not in-play).
       const state = comp.status?.type?.state; // "pre" | "in" | "post"
       const completed = comp.status?.type?.completed ?? false;
       let status: EspnMatchResult["status"] = "scheduled";
-      if (state === "in") status = "live";
-      else if (state === "post" || completed) status = "finished";
+      if (state === "in") {
+        status = "live";
+      } else if (state === "post") {
+        status = "finished";
+      } else if (state === "pre") {
+        status = "scheduled";
+      } else if (completed) {
+        // Unknown state but completed flag is set — treat as finished only
+        // when we didn't already classify as live above. (Safety fallback
+        // for unusual ESPN payloads.)
+        status = "finished";
+      }
+      // Explicit overrides for postponed / cancelled (these come through as
+      // status.type.name and override any state-based classification).
       if (comp.status?.type?.name === "postponed") status = "postponed";
       if (comp.status?.type?.name === "cancelled") status = "cancelled";
 

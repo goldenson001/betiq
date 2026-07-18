@@ -11,6 +11,13 @@
  *   5. Per-source rolling Brier score (sources with good recent calibration)
  *   6. Per-source rolling CLV (sources that systematically beat the close)
  *   7. Per-tier historical win rate (Bayesian prior from ParlayTierStats)
+ *   8. Past H2H agreement — does the historical head-to-head record between
+ *      these two teams ENDORSE the prediction's selection? H2H captures
+ *      stylistic mismatches that generic form misses (e.g. a counter-attacking
+ *      side that consistently beats a possession side). The agreement score is
+ *      market-aware: 1X2/DC/DNB use direct H2H probabilities, OU markets use
+ *      H2H avg goals, BTTS uses H2H both-scored %, and other markets use a
+ *      generic "predictability" signal.
  *
  * The model is SELF-LEARNING: after every parlay settles, the feedback loop
  * calls `updateParlayTierStats()` which updates the rolling win rate. The next
@@ -25,6 +32,7 @@
 
 import { db } from "@/lib/db";
 import { applyPlatt, sigmoid } from "./calibration";
+import { computeH2HAgreement, type H2HAgreementResult } from "@/lib/prediction/h2h";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
@@ -55,6 +63,8 @@ export interface LegInput {
   leagueId: string | null;
   /** Pre-looked-up CLV for this (market, league) pair. */
   marketLeagueClv: number | null;
+  /** Past head-to-head JSON from ESPN summary (stored on Match.h2hJson). */
+  h2hJson?: string | null;
 }
 
 export interface LegMLScore {
@@ -73,9 +83,12 @@ export interface LegMLScore {
     sourceBrier: number;     // 1 - brier/0.25 (better sources → higher)
     sourceClv: number;       // sigmoid(avg source CLV)
     tierHistory: number;     // observed tier win rate (or 0.5 cold start)
+    h2h: number;             // past head-to-head agreement (0-1, or 0.5 if no data)
   };
   /** Sample count backing the tierHistory component (0 = cold start). */
   sampleCount: number;
+  /** Past H2H agreement breakdown (null when no H2H data available). */
+  h2hBreakdown: H2HAgreementResult | null;
 }
 
 export interface ParlayTierStatsRow {
@@ -95,17 +108,23 @@ export interface ParlayTierStatsRow {
 // These weights determine how much each ML signal contributes to the final
 // reliability score. They sum to 1.0. Calibrated probability dominates because
 // it's the strongest single predictor, but the other signals provide important
-// context that pure probability misses (e.g. a 0.80 prob from a single
-// low-quality source is much less reliable than a 0.80 prob from 4 high-
-// quality sources in agreement).
+// context that pure probability misses.
+//
+// H2H agreement is now the SECOND-highest individual component (after prob)
+// because historical head-to-head matchups are the single most reliable
+// predictor of stylistic mismatches that form/elo miss. A 0.80 prob pick that
+// H2H actively contradicts (e.g. home side has lost 7 of last 10 to this
+// opponent) should be downweighted more than a 0.78 prob pick that H2H strongly
+// endorses.
 export const ML_WEIGHTS = {
-  prob: 0.40,            // Calibrated probability is the strongest signal
-  consensus: 0.15,       // Multi-source agreement
-  lowDisagreement: 0.10, // Sources agreeing on the probability
-  marketClv: 0.15,       // This combo historically beats the closing line
-  sourceBrier: 0.10,     // Sources with good recent calibration
+  prob: 0.35,            // Calibrated probability — still the dominant signal
+  consensus: 0.13,       // Multi-source agreement
+  lowDisagreement: 0.09, // Sources agreeing on the probability
+  marketClv: 0.13,       // This combo historically beats the closing line
+  sourceBrier: 0.09,     // Sources with good recent calibration
   sourceClv: 0.05,       // Sources that beat the closing line
   tierHistory: 0.05,     // Win rate of similar parlays historically
+  h2h: 0.11,             // Past head-to-head agreement — historical matchup signal
 } as const;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -188,6 +207,13 @@ export function computeLegMLScore(
     ? Math.max(0, Math.min(1, tierHistoryWinRate))
     : 0.5;
 
+  // ── Component 8: Past H2H agreement ────────────────────────────────────
+  // Market-aware agreement between the prediction's selection and the
+  // historical head-to-head record. Returns null if no H2H data — we then
+  // fall back to 0.5 (neutral) so legs without H2H data aren't penalized.
+  const h2hBreakdown = computeH2HAgreement(leg.h2hJson, leg.market, leg.selection);
+  const h2h = h2hBreakdown ? h2hBreakdown.score : 0.5;
+
   // ── Weighted combination ────────────────────────────────────────────────
   const components = {
     prob: calibratedProb,
@@ -197,6 +223,7 @@ export function computeLegMLScore(
     sourceBrier,
     sourceClv,
     tierHistory,
+    h2h,
   };
 
   const reliability = Math.max(0, Math.min(1,
@@ -206,7 +233,8 @@ export function computeLegMLScore(
     ML_WEIGHTS.marketClv * components.marketClv +
     ML_WEIGHTS.sourceBrier * components.sourceBrier +
     ML_WEIGHTS.sourceClv * components.sourceClv +
-    ML_WEIGHTS.tierHistory * components.tierHistory
+    ML_WEIGHTS.tierHistory * components.tierHistory +
+    ML_WEIGHTS.h2h * components.h2h
   ));
 
   // ── ML-adjusted probability ─────────────────────────────────────────────
@@ -214,7 +242,8 @@ export function computeLegMLScore(
   // score. A 0.80 prob with 0.95 reliability stays at ~0.80; a 0.80 prob with
   // 0.50 reliability drops to ~0.65 (we're less confident in that 0.80).
   // This way the parlay's combined probability reflects BOTH the stated
-  // probability AND how much we trust that probability.
+  // probability AND how much we trust that probability — including the H2H
+  // signal that's now baked into `reliability`.
   const adjustedProb = Math.max(0.001, Math.min(0.999,
     calibratedProb * 0.7 + reliability * 0.3
   ));
@@ -225,6 +254,7 @@ export function computeLegMLScore(
     adjustedProb,
     components,
     sampleCount: tierSampleCount,
+    h2hBreakdown,
   };
 }
 

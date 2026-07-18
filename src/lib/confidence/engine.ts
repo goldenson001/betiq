@@ -583,7 +583,7 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   // Track per-prediction source info for ML scoring (sourcesJson → source names
   // → SourceMLInfo lookup). We need this to compute weighted Platt-calibrated
   // probabilities per leg.
-  const legSourceInfoMap = new Map<string, { sources: LegInput["sources"]; leagueId: string | null; market: string; disagreement: number | null; consensusSources: number }>();
+  const legSourceInfoMap = new Map<string, { sources: LegInput["sources"]; leagueId: string | null; market: string; disagreement: number | null; consensusSources: number; h2hJson: string | null }>();
 
   for (const m of matches) {
     for (const p of m.predictions) {
@@ -637,6 +637,11 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         market: p.market,
         disagreement: p.disagreement,
         consensusSources: p.consensusSources ?? 0,
+        // ── B8: Past H2H JSON for ML reliability scoring ──────────────────
+        // The Match row stores ESPN's headToHead summary as JSON. We pass it
+        // through to the ML layer so computeH2HAgreement can compute a
+        // market-aware agreement score for this leg's selection.
+        h2hJson: (m as { h2hJson?: string | null }).h2hJson ?? null,
       });
     }
   }
@@ -710,6 +715,8 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
       sources: info.sources,
       leagueId: info.leagueId,
       marketLeagueClv: marketClv,
+      // ── B8: Past H2H JSON for ML reliability scoring ──────────────────
+      h2hJson: info.h2hJson,
     };
     const mlScore = computeLegMLScore(legInput, tierWinRate, tierSampleCount);
     legMLMap.set(leg.predictionId, mlScore);

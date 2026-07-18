@@ -128,13 +128,29 @@ export async function GET(req: NextRequest): Promise<NextResponse<ScoresLiveResp
   for (const m of matches) {
     const espn = byExternalId.get(m.externalId);
     if (!espn) continue;
+    // ── Status regression safety ──────────────────────────────────────────
+    // Allow ESPN to "correct" a previously-wrong status. Specifically:
+    //   - DB has "finished" but ESPN now says "live"  → revert to live
+    //     (happens when ESPN briefly sets completed=true mid-match)
+    //   - DB has "live" but ESPN now says "scheduled"  → DO NOT regress
+    //     (a match that has already kicked off can't be un-kicked)
+    //   - DB has "finished" but ESPN now says "scheduled" → keep finished
+    // For all other cases, accept ESPN's value.
+    let effectiveStatus = espn.status;
+    if (espn.status === "scheduled" && (m.status === "live" || m.status === "finished")) {
+      // Don't regress from a more-advanced state to scheduled — ESPN is
+      // probably returning a stale "pre" payload for a match that has
+      // already kicked off.
+      effectiveStatus = m.status;
+    }
+
     // Determine if there's anything to update
     const needsUpdate =
       m.homeScore !== espn.homeScore ||
       m.awayScore !== espn.awayScore ||
       m.htHomeScore !== espn.htHomeScore ||
       m.htAwayScore !== espn.htAwayScore ||
-      (m.status !== espn.status && espn.status !== "scheduled");
+      m.status !== effectiveStatus;
     if (!needsUpdate) continue;
 
     await db.match.update({
@@ -144,7 +160,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<ScoresLiveResp
         awayScore: espn.awayScore,
         htHomeScore: espn.htHomeScore,
         htAwayScore: espn.htAwayScore,
-        status: espn.status,
+        status: effectiveStatus,
       },
     });
   }

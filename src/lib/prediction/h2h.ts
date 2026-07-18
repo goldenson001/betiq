@@ -181,3 +181,158 @@ export function h2hProbabilityForSelection(
     confidence: h2h.confidence,
   };
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// H2H → ML reliability component
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * H2H agreement score for the ML reliability model.
+ *
+ * Returns a value in [0, 1] expressing how strongly the historical head-to-
+ * head record ENDORSES the prediction's selection. Higher = safer leg.
+ *
+ * The score blends TWO sub-signals:
+ *
+ *   1. Agreement (0..1) — how much the H2H probability for the selection
+ *      exceeds a neutral baseline of 0.33. A selection that H2H gives ≥50%
+ *      to scores ≥0.5; a selection H2H gives <30% to scores <0.3.
+ *
+ *   2. Sample confidence (0..1) — how much we trust the H2H data itself,
+ *      based on sample size. <3 games → 0.20, 3-5 → 0.50, 6-9 → 0.75,
+ *      10+ → 0.90.
+ *
+ * Final score = agreement × 0.7 + sampleConfidence × 0.3
+ *
+ * Market-aware:
+ *   - 1x2, dnb, double_chance — direct lookup against H2H 1X2 probs
+ *   - ou25 / ou15 / ou35 — derived from H2H avg goals per game
+ *   - btts — derived from H2H % of games where both teams scored
+ *   - other markets (asian_handicap, corners, cards, bet_builder, etc.) —
+ *     use generic "predictability" signal: how dominant was the most common
+ *     H2H outcome? A 7W-2D-1L pattern is more predictable than 4W-3D-3L.
+ *
+ * Returns null if no H2H data is available — the ML model will use 0.5
+ * (neutral) in that case.
+ */
+export interface H2HAgreementResult {
+  /** Final H2H score in [0, 1] — higher = H2H endorses the pick. */
+  score: number;
+  /** Sub-signal: agreement between H2H and the pick (0..1). */
+  agreement: number;
+  /** Sub-signal: trust in the H2H sample itself (0..1). */
+  sampleConfidence: number;
+  /** Sample size (number of H2H games). */
+  sampleSize: number;
+  /** Short human-readable explanation for UI tooltips. */
+  label: string;
+}
+
+export function computeH2HAgreement(
+  h2hJson: string | null | undefined,
+  market: string,
+  selection: string
+): H2HAgreementResult | null {
+  const summary = parseH2HJson(h2hJson);
+  if (!summary) return null;
+
+  const N = summary.lastMatches.length;
+  if (N === 0) return null;
+
+  // Sample confidence — saturates at 10 games.
+  const sampleConfidence = N >= 10 ? 0.90
+    : N >= 6 ? 0.75
+    : N >= 3 ? 0.50
+    : 0.20;
+
+  // ── Market-aware agreement ──────────────────────────────────────────────
+  let agreement = 0.5; // neutral default
+  let label = "";
+
+  const marketLower = market.toLowerCase();
+
+  if (marketLower === "1x2" || marketLower === "dnb" || marketLower === "double_chance") {
+    // Direct 1X2 lookup. For DNB, "1" → home win, "2" → away win (draw = void).
+    // For double_chance, selection may be "1X", "12", or "X2".
+    const h2h = h2hProbability(h2hJson);
+    if (h2h) {
+      let p = 0;
+      if (marketLower === "double_chance") {
+        const sel = selection.toUpperCase();
+        if (sel === "1X") p = h2h.pHome + h2h.pDraw;
+        else if (sel === "X2") p = h2h.pDraw + h2h.pAway;
+        else if (sel === "12") p = h2h.pHome + h2h.pAway;
+        else p = 0.5;
+      } else {
+        // "1" / "X" / "2"
+        const sel = selection.toUpperCase() === "1" ? "1"
+          : selection.toUpperCase() === "2" ? "2"
+          : "X";
+        p = sel === "1" ? h2h.pHome : sel === "2" ? h2h.pAway : h2h.pDraw;
+      }
+      // Map [0, 1] → agreement score:
+      //   p >= 0.60 → 0.85+ (strong endorsement)
+      //   p ~ 0.50 → 0.65 (mild endorsement)
+      //   p ~ 0.33 → 0.50 (neutral)
+      //   p < 0.25 → 0.20 (H2H actively contradicts the pick)
+      agreement = Math.max(0.10, Math.min(0.95,
+        0.5 + (p - 0.33) * 1.8
+      ));
+      label = `H2H ${selection.toUpperCase()}: ${Math.round(p * 100)}%`;
+    }
+  } else if (marketLower === "ou25" || marketLower === "ou15" || marketLower === "ou35") {
+    // Derive avg goals from H2H last matches
+    let totalGoals = 0;
+    for (const m of summary.lastMatches) {
+      totalGoals += m.homeScore + m.awayScore;
+    }
+    const avgGoals = totalGoals / N;
+    const threshold = marketLower === "ou15" ? 1.5
+      : marketLower === "ou35" ? 3.5
+      : 2.5;
+    const sel = selection.toLowerCase();
+    const isOver = sel.startsWith("over") || sel === "o" || sel.startsWith("o ");
+    // P(over) ≈ Poisson(avgGoals) for goals > threshold.
+    // Simple approximation: ratio of games above threshold
+    let overCount = 0;
+    for (const m of summary.lastMatches) {
+      if (m.homeScore + m.awayScore > threshold) overCount++;
+    }
+    const observedOverPct = overCount / N;
+    const p = isOver ? observedOverPct : 1 - observedOverPct;
+    agreement = Math.max(0.10, Math.min(0.95,
+      0.5 + (p - 0.5) * 1.6
+    ));
+    label = `H2H avg ${avgGoals.toFixed(1)} goals · ${isOver ? "Over" : "Under"} ${threshold}: ${Math.round(p * 100)}%`;
+  } else if (marketLower === "btts") {
+    // BTTS — % of H2H games where both teams scored
+    let bttsCount = 0;
+    for (const m of summary.lastMatches) {
+      if (m.homeScore > 0 && m.awayScore > 0) bttsCount++;
+    }
+    const bttsPct = bttsCount / N;
+    const sel = selection.toLowerCase();
+    const isYes = sel === "yes" || sel === "y" || sel.includes("yes");
+    const p = isYes ? bttsPct : 1 - bttsPct;
+    agreement = Math.max(0.10, Math.min(0.95,
+      0.5 + (p - 0.5) * 1.6
+    ));
+    label = `H2H BTTS ${isYes ? "Yes" : "No"}: ${Math.round(p * 100)}%`;
+  } else {
+    // Generic "predictability" — how dominant is the most common H2H outcome?
+    // A 7W-2D-1L pattern (70% one outcome) is highly predictable → 0.80.
+    // A 4W-3D-3L pattern (40% top outcome) is chaotic → 0.45.
+    const counts = [summary.homeWins, summary.awayWins, summary.draws].sort((a, b) => b - a);
+    const dominantShare = counts[0] / N;
+    agreement = Math.max(0.20, Math.min(0.85,
+      0.35 + dominantShare * 0.6
+    ));
+    label = `H2H dominant outcome: ${Math.round(dominantShare * 100)}%`;
+  }
+
+  const score = Math.max(0.05, Math.min(0.95,
+    agreement * 0.7 + sampleConfidence * 0.3
+  ));
+
+  return { score, agreement, sampleConfidence, sampleSize: N, label };
+}
