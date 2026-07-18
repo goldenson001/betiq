@@ -25,6 +25,12 @@
  * correlation. We apply a haircut to combinedProbability before computing
  * Kelly, so effective stake shrinks for correlated parlays.
  *
+ * B5 upgrade: No-overlap rule. Each match appears in AT MOST ONE parlay tier
+ * per day. Build order: safest → medium → high → mega. Each tier claims its
+ * matchIds and removes them from the pool seen by subsequent tiers. A tier
+ * may end up empty if all its eligible matches were claimed by an earlier
+ * tier — that's intentional (an empty tier is better than a duplicated leg).
+ *
  * Persists all four parlays to DB. Idempotent: clears existing parlays for
  * the date before re-creating.
  */
@@ -257,6 +263,14 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
     return { safest: null, mediumRisk: null, highRisk: null, megaOdds: null };
   }
 
+  // ── No-overlap rule: each match appears in at most ONE parlay tier ─────────
+  // Build order matters: safest goes first (strictest requirements, needs the
+  // best high-prob legs), then medium, then high, then mega. Each tier claims
+  // its matchIds and the next tier only sees the remaining pool.
+  // If a tier would starve (empty) because all its eligible matches are already
+  // claimed, that's fine — we'd rather have an empty tier than a duplicate leg.
+  const usedMatchIds = new Set<string>();
+
   // B3: Tightened safest tier — minLegProb from SAFEST_MIN_LEG_PROB (default 0.80,
   // was 0.75), minConsensus from SAFEST_MIN_LEG_SOURCES (default 2, was 0).
   // This raises the safest-tier win rate to investment-grade (~50%+ combined prob
@@ -270,9 +284,24 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
       minConsensus: ENGINE_CONFIG.SAFEST_MIN_LEG_SOURCES,
     }
   );
-  const mediumRisk = buildGreedyParlay(allLegs, { maxLegs: 4, minLegProb: 0.55, minCombinedProb: 0.08 });
-  const highRisk = buildGreedyParlay(allLegs, { maxLegs: 5, minLegProb: 0.40, minCombinedProb: 0.015 });
-  const megaOdds = buildMegaOddsParlay(allLegs);
+  for (const leg of safest.legs) usedMatchIds.add(leg.matchId);
+
+  const mediumRisk = buildGreedyParlay(
+    allLegs.filter((l) => !usedMatchIds.has(l.matchId)),
+    { maxLegs: 4, minLegProb: 0.55, minCombinedProb: 0.08 }
+  );
+  for (const leg of mediumRisk.legs) usedMatchIds.add(leg.matchId);
+
+  const highRisk = buildGreedyParlay(
+    allLegs.filter((l) => !usedMatchIds.has(l.matchId)),
+    { maxLegs: 5, minLegProb: 0.40, minCombinedProb: 0.015 }
+  );
+  for (const leg of highRisk.legs) usedMatchIds.add(leg.matchId);
+
+  const megaOdds = buildMegaOddsParlay(
+    allLegs.filter((l) => !usedMatchIds.has(l.matchId))
+  );
+  for (const leg of megaOdds.legs) usedMatchIds.add(leg.matchId);
 
   // Clear existing parlays for this date (covers old "daily_best"/"safe"/"value" types too)
   await db.parlay.deleteMany({ where: { matchDate: dateStr } });
