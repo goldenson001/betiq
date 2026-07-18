@@ -571,10 +571,17 @@ export async function processResultsForDate(dateStr: string): Promise<{
     // Need to check each leg's prediction result
     let allWon = true;
     let anyLost = false;
+    let pendingLegs = 0;
     for (const leg of legs) {
       const legMatch = await db.match.findUnique({ where: { id: leg.matchId } });
+      // ── Don't settle a parlay until ALL legs have final scores ──────────
+      // If any leg's match hasn't finished yet, leave the parlay
+      // `evaluated: false` so we retry on the next pipeline run.
+      // Previously this code marked the parlay as `evaluated: true, won: false`
+      // on the first partial pass, which (a) was wrong (could still win) and
+      // (b) never got re-evaluated once the remaining legs finished.
       if (!legMatch || legMatch.homeScore === null || legMatch.awayScore === null) {
-        allWon = false;
+        pendingLegs++;
         continue;
       }
       const r: MatchResult = {
@@ -590,6 +597,15 @@ export async function processResultsForDate(dateStr: string): Promise<{
         anyLost = true;
         allWon = false;
       }
+    }
+    // If any leg is still pending (match not finished), skip settlement entirely.
+    // The parlay stays `evaluated: false` and will be retried on the next run
+    // once ESPN posts the final score for the missing match(es).
+    if (pendingLegs > 0 && !anyLost) {
+      // Edge case: if we already KNOW a leg lost, we could mark it lost now.
+      // But to keep semantics simple and audit-friendly, we wait until all
+      // legs are settled so the `won` flag is final, not provisional.
+      continue;
     }
     await db.parlay.update({
       where: { id: parlay.id },
@@ -703,16 +719,26 @@ async function computePerformanceSnapshot(
 }
 
 /**
- * Runs the feedback loop for any date that's older than today and hasn't been
- * processed yet. Called by the scheduler before each morning's scrape.
+ * Runs the feedback loop for any date <= today that has unprocessed matches.
+ * Called by the scheduler before each morning's scrape and after every
+ * pipeline run. Same-day early kickoffs (e.g. 14:00 Brussels) settle the
+ * same day once ESPN posts final scores, rather than waiting 24h.
  */
 export async function runFeedbackLoopForUnprocessedDates(): Promise<{
   datesProcessed: string[];
 }> {
+  // ── Include today in the date window ─────────────────────────────────────
+  // Previously this used `matchDate: { lt: today }`, which meant a match that
+  // kicked off at 14:00 Brussels and finished by 16:00 wouldn't have its
+  // result processed until the next day's pipeline run. That delayed parlay
+  // settlement by ~24h for early kickoffs.
+  //
+  // We now include today. The per-match check inside processResultsForDate
+  // already handles the "match hasn't finished yet" case gracefully — it just
+  // skips that match and leaves `resultProcessed: false` for the next run.
   const today = new Date().toISOString().slice(0, 10);
-  // Find all distinct matchDates with unprocessed matches older than today
   const matches = await db.match.findMany({
-    where: { resultProcessed: false, matchDate: { lt: today } },
+    where: { resultProcessed: false, matchDate: { lte: today } },
     select: { matchDate: true },
     distinct: ["matchDate"],
   });
