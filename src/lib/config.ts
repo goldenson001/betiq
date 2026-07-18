@@ -157,6 +157,28 @@ export const ENGINE_CONFIG = {
   // 0 = ignore goal model (legacy behavior), 1 = pure goal model.
   GOALMODEL_PRIOR_WEIGHT: num("GOALMODEL_PRIOR_WEIGHT", 0.30, 0.0, 1.0),
 
+  // ── D1: H2H + Form blend (80/20 model) ─────────────────────────────────────
+  // User-driven rebalance: 80% of the probability comes from "diligent research"
+  // (H2H history + recent form), 20% from the Poisson goal model.
+  // Tipster consensus becomes a small tiebreaker, not the primary driver.
+  //
+  // Default blend for 1X2:
+  //   final = H2H_WEIGHT × h2h_prob
+  //         + FORM_WEIGHT × form_prob
+  //         + POISSON_WEIGHT × poisson_prob
+  //         + TIPSTER_TIEBREAKER_WEIGHT × tipster_prob
+  //
+  // H2H_WEIGHT + FORM_WEIGHT = 0.80 (the "research" block)
+  // POISSON_WEIGHT = 0.20 (the "model" block)
+  // TIPSTER_TIEBREAKER_WEIGHT is APPLIED LAST as a small blend on top.
+  //
+  // When H2H data is missing (only ~30% of matches have it), the H2H weight
+  // is reallocated proportionally to FORM + POISSON so the total still = 1.0.
+  H2H_WEIGHT: num("H2H_WEIGHT", 0.50, 0.0, 1.0),
+  FORM_WEIGHT: num("FORM_WEIGHT", 0.30, 0.0, 1.0),
+  POISSON_WEIGHT: num("POISSON_WEIGHT", 0.20, 0.0, 1.0),
+  TIPSTER_TIEBREAKER_WEIGHT: num("TIPSTER_TIEBREAKER_WEIGHT", 0.10, 0.0, 0.50),
+
   // ── Elo team-strength prior (A2) ───────────────────────────────────────────
   // K-factor for Elo updates (higher = more volatile). 20 is standard for
   // club soccer.

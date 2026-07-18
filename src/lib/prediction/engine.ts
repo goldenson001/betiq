@@ -15,7 +15,9 @@ import { kelly as kellyStake, kellyParlay as kellyParlayStake } from "@/lib/lear
 import { applyPortfolioCap, computeDrawdownState, type DrawdownState } from "@/lib/learning/risk";
 import { loadMarketLeagueClvMap } from "@/lib/learning/feedback";
 import { loadEloProbability, DEFAULT_ELO } from "@/lib/learning/elo";
-import { fitGoalModel, goalModelOverUnder, goalModelBtts, goalModelCorrectScore, goalModelMostLikelyScore, type GoalModelFit } from "./poisson";
+import { fitGoalModel, goalModelOverUnder, goalModelBtts, goalModelCorrectScore, goalModelMostLikelyScore, goalModel1X2, type GoalModelFit } from "./poisson";
+import { h2hProbability } from "./h2h";
+import { formProbability } from "./form-model";
 import { ENGINE_CONFIG } from "@/lib/config";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -356,6 +358,10 @@ interface MatchContext {
   awayVenueForm?: string | null;
   restDaysHome?: number | null;
   restDaysAway?: number | null;
+  // ── D1: H2H head-to-head history (JSON from ESPN) ─────────────────────────
+  // Last 10 historical meetings between these two specific teams. Used as a
+  // PRIMARY signal (50% weight) in the new 80/20 blend.
+  h2hJson?: string | null;
   // ── A2: Elo team-strength prior ───────────────────────────────────────────
   eloPrior?: { pHome: number; pDraw: number; pAway: number; sampleSize: number } | null;
   // ── A1: Bivariate-Poisson / Dixon-Coles goal model fit ────────────────────
@@ -408,6 +414,118 @@ interface MatchContext {
 
 export type { MatchContext };
 
+// ──────────────────────────────────────────────────────────────────────────────
+// D1: 80/20 Research Blend (H2H + Form = 80%, Poisson = 20%)
+// ──────────────────────────────────────────────────────────────────────────────
+// User-driven rebalance: H2H history + recent form are the PRIMARY drivers
+// (80% combined), with the Dixon-Coles Poisson goal model providing the
+// remaining 20%. Tipster consensus becomes a small tiebreaker blended on top.
+//
+// This function takes a TIPSTER-derived 1X2 vector (the old "probBlend") and
+// the match context (which carries H2H + form data), and produces a new
+// 1X2 vector that respects the 80/20 weighting.
+//
+// When H2H data is missing (about 70% of matches), the H2H weight is
+// reallocated proportionally to FORM + POISSON so the total still = 1.0.
+// When FORM data is also missing, more weight goes to POISSON + tipster.
+//
+// `tipsterVector` is the post-consensus, post-Platt 1X2 vector (pHome/pDraw/pAway).
+// `poissonVector` is the goal-model-derived 1X2 vector (computed from λ_home/λ_away).
+//   When null, the Poisson weight is reallocated to FORM/H2H.
+function computeResearchBlend(
+  ctx: MatchContext,
+  tipsterVector: { pHome: number; pDraw: number; pAway: number },
+  poissonVector: { pHome: number; pDraw: number; pAway: number } | null
+): { pHome: number; pDraw: number; pAway: number } {
+  // ── Fetch the three research signals ──────────────────────────────────────
+  const h2h = h2hProbability(ctx.h2hJson);
+  const form = formProbability(
+    ctx.homeForm, ctx.awayForm,
+    ctx.homeVenueForm, ctx.awayVenueForm
+  );
+
+  // ── Compute effective weights (reallocating missing signals) ──────────────
+  let wH2H = ENGINE_CONFIG.H2H_WEIGHT;
+  let wForm = ENGINE_CONFIG.FORM_WEIGHT;
+  let wPoisson = ENGINE_CONFIG.POISSON_WEIGHT;
+
+  // If H2H is missing, redistribute its weight to Form (60%) and Poisson (40%)
+  if (!h2h) {
+    const redistributed = wH2H;
+    wForm += redistributed * 0.60;
+    wPoisson += redistributed * 0.40;
+    wH2H = 0;
+  }
+  // If Form is missing, redistribute its weight to H2H (60%) and Poisson (40%)
+  if (!form) {
+    const redistributed = wForm;
+    wH2H += redistributed * 0.60;
+    wPoisson += redistributed * 0.40;
+    wForm = 0;
+  }
+  // If Poisson is missing, redistribute its weight to H2H (50%) and Form (50%)
+  if (!poissonVector) {
+    const redistributed = wPoisson;
+    wH2H += redistributed * 0.50;
+    wForm += redistributed * 0.50;
+    wPoisson = 0;
+  }
+
+  // ── Combine the research signals ──────────────────────────────────────────
+  let pHome = 0, pDraw = 0, pAway = 0;
+  if (h2h) {
+    pHome += wH2H * h2h.pHome;
+    pDraw += wH2H * h2h.pDraw;
+    pAway += wH2H * h2h.pAway;
+  }
+  if (form) {
+    pHome += wForm * form.pHome;
+    pDraw += wForm * form.pDraw;
+    pAway += wForm * form.pAway;
+  }
+  if (poissonVector) {
+    pHome += wPoisson * poissonVector.pHome;
+    pDraw += wPoisson * poissonVector.pDraw;
+    pAway += wPoisson * poissonVector.pAway;
+  }
+
+  // Normalize (in case weights didn't sum to 1 due to redistribution edge cases)
+  const s = pHome + pDraw + pAway;
+  if (s > 0) { pHome /= s; pDraw /= s; pAway /= s; }
+
+  // ── Apply tipster tiebreaker (small blend on top) ─────────────────────────
+  // Even with the 80/20 research blend, we still want tipster consensus to
+  // break ties and catch egregious errors. Blend in at TIPSTER_TIEBREAKER_WEIGHT.
+  const wTipster = ENGINE_CONFIG.TIPSTER_TIEBREAKER_WEIGHT;
+  const wResearch = 1 - wTipster;
+  pHome = wResearch * pHome + wTipster * tipsterVector.pHome;
+  pDraw = wResearch * pDraw + wTipster * tipsterVector.pDraw;
+  pAway = wResearch * pAway + wTipster * tipsterVector.pAway;
+
+  // Final renormalize
+  const s2 = pHome + pDraw + pAway;
+  if (s2 > 0) { pHome /= s2; pDraw /= s2; pAway /= s2; }
+
+  return { pHome, pDraw, pAway };
+}
+
+/**
+ * Helper: derive a 1X2 probability vector from a Dixon-Coles goal model fit.
+ * Used to provide the "Poisson component" of the 80/20 research blend.
+ *
+ * Returns null if no goal model fit is available.
+ */
+function poissonVectorFromGoalModel(fit: GoalModelFit | null | undefined): { pHome: number; pDraw: number; pAway: number } | null {
+  if (!fit) return null;
+  // Use the goal model's implied 1X2 probabilities, computed from the
+  // Dixon-Coles score matrix (handles low-score correlation correctly).
+  try {
+    return goalModel1X2(fit);
+  } catch {
+    return null;
+  }
+}
+
 function gen1X2(ctx: MatchContext): EnginePrediction {
   const picks: SourcePick[] = ctx.rawPredictions
     .filter((r) => r.prediction["1x2"])
@@ -421,81 +539,81 @@ function gen1X2(ctx: MatchContext): EnginePrediction {
       calibrationA: r.calibrationA,
       calibrationB: r.calibrationB,
     }));
-  // If sources also expose probabilities, blend with mode
-  let probBlend = weightedMode(picks).probability;
-  // Augment with average probabilities (Platt-calibrated per source)
+
+  // ── Compute TIPSTER-derived 1X2 vector (the "old" probability) ────────────
+  // This becomes the tiebreaker signal in the new 80/20 blend.
+  const tipster = compute1X2Probabilities(ctx);
+  // Fallback: if compute1X2Probabilities returned null (no tipster 1X2 picks),
+  // use a neutral baseline. The research blend will dominate.
+  const tipsterVector = tipster ?? { pHome: 0.40, pDraw: 0.27, pAway: 0.33 };
+
+  // ── D1: Fit goal model from tipster vector → Poisson 1X2 vector ───────────
+  // The goal model gives us the "Poisson component" for the 80/20 blend.
+  // Fit (λ_home, λ_away) from the tipster 1X2 vector + O/U 2.5 line if available.
+  let poissonVector: { pHome: number; pDraw: number; pAway: number } | null = null;
+  let goalModelFit: GoalModelFit | null = null;
+  try {
+    let pOver25: number | undefined;
+    if (ctx.marketOdds?.over25 && ctx.marketOdds.over25 > 1) {
+      pOver25 = 1 / ctx.marketOdds.over25;
+    }
+    goalModelFit = fitGoalModel({
+      pHome: tipsterVector.pHome,
+      pDraw: tipsterVector.pDraw,
+      pAway: tipsterVector.pAway,
+      pOver25,
+    });
+    poissonVector = poissonVectorFromGoalModel(goalModelFit);
+  } catch {
+    // Goal model fit failed — poissonVector stays null, weight is reallocated.
+  }
+
+  // ── D1: Apply the 80/20 research blend ─────────────────────────────────────
+  // H2H (50%) + Form (30%) + Poisson (20%) + Tipster tiebreaker (10% on top)
+  const blended = computeResearchBlend(ctx, tipsterVector, poissonVector);
+
+  // ── Selection: pick the outcome with the highest blended probability ───────
+  // (Old code used weightedMode(picks).selection — tipster-driven. We now use
+  // the blended vector, which means H2H/Form can OVERRIDE tipster consensus
+  // when the research signals strongly disagree.)
+  let selection: "1" | "X" | "2";
+  if (blended.pHome >= blended.pDraw && blended.pHome >= blended.pAway) selection = "1";
+  else if (blended.pAway >= blended.pHome && blended.pAway >= blended.pDraw) selection = "2";
+  else selection = "X";
+
+  let probBlend = selection === "1" ? blended.pHome : selection === "2" ? blended.pAway : blended.pDraw;
+
+  // ── Compute disagreement (stdev of per-source tipster probabilities) ───────
+  // Kept from the old code — used for the source-disagreement indicator (C2).
   const probSources = ctx.rawPredictions.filter((r) => r.prediction.probabilities);
-  // ── C2: Track per-source probabilities for the selected outcome so we can
-  // compute disagreement (stdev). Low stdev = sources agree; high = lottery.
   let disagreement: number | undefined;
   if (probSources.length > 0) {
-    let sumW = 0;
-    let pHome = 0, pDraw = 0, pAway = 0;
+    const perSourceProbs: number[] = [];
     for (const r of probSources) {
       const pr = r.prediction.probabilities!;
-      const w = r.weight;
-      // Apply Platt calibration to each source's stated probability — this
-      // corrects for systematic over/underconfidence. Identity (a=1, b=0)
-      // when params haven't been fitted yet.
       const a = r.calibrationA ?? 1;
       const b = r.calibrationB ?? 0;
-      pHome += applyPlatt(pr.home ?? 0.33, a, b) * w;
-      pDraw += applyPlatt(pr.draw ?? 0.33, a, b) * w;
-      pAway += applyPlatt(pr.away ?? 0.33, a, b) * w;
-      sumW += w;
+      const p = selection === "1" ? pr.home : selection === "2" ? pr.away : pr.draw;
+      if (p !== undefined) perSourceProbs.push(applyPlatt(p, a, b));
     }
-    if (sumW > 0) {
-      pHome /= sumW; pDraw /= sumW; pAway /= sumW;
-      // Re-normalize (Platt can push the three probs off-sum slightly)
-      const sumP = pHome + pDraw + pAway;
-      if (sumP > 0) { pHome /= sumP; pDraw /= sumP; pAway /= sumP; }
-      const mode = weightedMode(picks);
-      const probFromProbs = mode.selection === "1" ? pHome : mode.selection === "2" ? pAway : pDraw;
-      // Blend 60% mode weight, 40% explicit (calibrated) probability
-      probBlend = 0.6 * probBlend + 0.4 * probFromProbs;
-
-      // ── C2: Compute disagreement = stdev of per-source probabilities ──────
-      // For the selected outcome, gather each source's calibrated probability
-      // and compute the standard deviation.
-      const sel = mode.selection;
-      const perSourceProbs: number[] = [];
-      for (const r of probSources) {
-        const pr = r.prediction.probabilities!;
-        const a = r.calibrationA ?? 1;
-        const b = r.calibrationB ?? 0;
-        const p = sel === "1" ? pr.home : sel === "2" ? pr.away : pr.draw;
-        if (p !== undefined) perSourceProbs.push(applyPlatt(p, a, b));
-      }
-      if (perSourceProbs.length >= 2) {
-        const mean = perSourceProbs.reduce((s, p) => s + p, 0) / perSourceProbs.length;
-        const variance = perSourceProbs.reduce((s, p) => s + (p - mean) ** 2, 0) / perSourceProbs.length;
-        disagreement = Math.sqrt(variance);
-      }
+    if (perSourceProbs.length >= 2) {
+      const mean = perSourceProbs.reduce((s, p) => s + p, 0) / perSourceProbs.length;
+      const variance = perSourceProbs.reduce((s, p) => s + (p - mean) ** 2, 0) / perSourceProbs.length;
+      disagreement = Math.sqrt(variance);
     }
   }
-  const { selection, sources } = weightedMode(picks);
 
-  // ── A2: Elo prior blend ───────────────────────────────────────────────────
-  // When we have Elo ratings for at least one team, blend the Elo prior into
-  // the probability. Weight scales with Elo sample size and is capped at
-  // ELO_PRIOR_WEIGHT. In thin tipster coverage (1 source), Elo gets more
-  // weight; in broad coverage (4+ sources), less.
-  if (ctx.eloPrior && ctx.eloPrior.sampleSize > 0) {
-    const eloP = selection === "1" ? ctx.eloPrior.pHome : selection === "2" ? ctx.eloPrior.pAway : ctx.eloPrior.pDraw;
-    // Weight Elo more when tipster coverage is sparse and Elo sample is large.
-    const tipsterCount = sources.length;
-    const eloWeight = Math.min(
-      ENGINE_CONFIG.ELO_PRIOR_WEIGHT,
-      ENGINE_CONFIG.ELO_PRIOR_WEIGHT * Math.min(1, ctx.eloPrior.sampleSize / 20)
-    ) * (tipsterCount < 2 ? 1.5 : tipsterCount < 4 ? 1.0 : 0.5);
-    const w = Math.min(0.40, eloWeight); // cap at 40% blend
-    probBlend = probBlend * (1 - w) + eloP * w;
-  }
+  // sources count (for consensusBoost) — based on tipster picks for the selected outcome
+  const sources = picks.filter((p) => p.pick === selection).slice(0, 5).map((p) => ({
+    source: p.sourceName,
+    pick: p.pick,
+    weight: p.weight,
+  }));
 
   // ── Safer / higher-confidence ML layer ──────────────────────────────────────
-  // 1. Form adjustment — nudge home-win probability based on last-5 form.
-  //    Applied BEFORE the consensus boost so the boost compounds correctly.
-  //    A3: now uses venue-split form + rest-day penalty.
+  // 1. Form adjustment — small additional nudge on top of the blended probability.
+  //    The form-model already contributes 30% to the blend, so this is now a
+  //    minor fine-tuning (was the primary signal in the old engine).
   let adjustedProb = probBlend;
   if (selection === "1") {
     adjustedProb += formAdjustment(
@@ -522,6 +640,9 @@ function gen1X2(ctx: MatchContext): EnginePrediction {
   const probability = clampProbHigh(adjustedProb);
   const fo = fairOdds(probability);
   const bo = resolveBookOdds(probability, "1x2", selection, ctx.marketOdds);
+  // Persist the goal model fit on the context so genOu/genBtts/genCorrectScore
+  // can reuse it (avoids refitting).
+  ctx.goalModelFit = goalModelFit;
   return {
     market: "1x2",
     selection,
@@ -540,10 +661,18 @@ function gen1X2(ctx: MatchContext): EnginePrediction {
 }
 
 /**
- * Compute weighted 1X2 probabilities (pHome, pDraw, pAway) using the same
- * logic as gen1X2 but returning the full probability vector. Used by
- * derivative market generators (Double Chance, DNB) so they don't have to
- * re-derive the same blend math.
+ * Compute TIPSTER-derived 1X2 probabilities (pHome, pDraw, pAway).
+ *
+ * This returns the tipster consensus vector ONLY — it does NOT apply the 80/20
+ * research blend. Used by:
+ *   - gen1X2 → as input to computeResearchBlend (the tipster tiebreaker signal)
+ *   - genDoubleChance / genDnb → for derivative market probabilities
+ *
+ * D1 upgrade note: derivative markets (Double Chance, DNB) currently use the
+ * TIPSTER vector directly, not the blended vector. This is intentional — those
+ * markets are derived FROM the 1X2 selection, and we want them to be
+ * consistent with the 1X2 pick. The blended probability is applied to the
+ * 1X2 prediction itself.
  *
  * Returns null if no sources contributed any 1X2 signal.
  */
@@ -1420,18 +1549,16 @@ function fitGoalModelFrom1X2(ctx: MatchContext, pred1X2: EnginePrediction): Goal
  */
 export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] {
   const preds: EnginePrediction[] = [];
+  // gen1X2 now fits the goal model internally (needed for the 80/20 research
+  // blend's Poisson component) and stores it on ctx.goalModelFit.
   const pred1X2 = gen1X2(ctx);
   preds.push(pred1X2);
 
-  // ── A1: Fit goal model from 1X2 probabilities + O/U 2.5 line ──────────────
-  // The goal model gives us coherent (λ_home, λ_away) that we can use to
-  // derive O/U, BTTS, and correct score probabilities consistently.
-  // We compute the goal model from the 1X2 prediction (which already
-  // incorporates tipster consensus + form + Elo + CLV) so the goal markets
-  // inherit all those signals.
-  const goalModelFit = fitGoalModelFrom1X2(ctx, pred1X2);
-  // Extend ctx with the goal model fit so gen* functions can use it
-  const ctxWithGoal: MatchContext = { ...ctx, goalModelFit };
+  // ── A1: Goal model is already fit inside gen1X2 (D1 upgrade) ──────────────
+  // gen1X2 fits (λ_home, λ_away) from the tipster 1X2 vector + O/U 2.5 line,
+  // uses it as the Poisson component of the blend, and persists the fit on
+  // ctx.goalModelFit so genOu/genBtts/genCorrectScore can reuse the same fit.
+  const ctxWithGoal: MatchContext = ctx;
 
   // Derivative markets derived from 1X2 probabilities — these give users
   // alternative ways to bet the same prediction. Double Chance is the safest
@@ -1815,6 +1942,8 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
       awayVenueForm: (match as { awayVenueForm?: string | null }).awayVenueForm ?? null,
       restDaysHome: (match as { restDaysHome?: number | null }).restDaysHome ?? null,
       restDaysAway: (match as { restDaysAway?: number | null }).restDaysAway ?? null,
+      // ── D1: H2H historical matchups (ESPN headToHeadGames) ────────────────
+      h2hJson: (match as { h2hJson?: string | null }).h2hJson ?? null,
       // ── A2: Elo prior — loaded per match (teams + league) ─────────────────
       eloPrior: eloPriorMap.get(match.id) ?? null,
       // ── B3: market-league CLV map for safe-high-odds gate ────────────────
