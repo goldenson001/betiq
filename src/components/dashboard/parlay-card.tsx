@@ -2,7 +2,7 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { TrendingUp, Shield, Flame, Trophy, Sparkles, Target, Check, X, Clock } from "lucide-react";
+import { TrendingUp, Shield, Flame, Trophy, Sparkles, Target, Check, X, Clock, Brain } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatKelly } from "@/lib/dashboard/format";
 
@@ -56,6 +56,55 @@ export interface ParlayView {
   kellyFraction?: number | null;
   /** Optional live in-play status for each leg — injected by the dashboard. */
   live?: ParlayLiveSummary;
+  /** ── ML signals (from /api/parlays) ─────────────────────────────────── */
+  /** Parlay-level ML reliability score (avg of leg reliabilities), 0-1. */
+  mlScore?: number | null;
+  /** JSON string with per-leg ML breakdown — see parlay-ml.ts for shape. */
+  mlComponentsJson?: string | null;
+  /** Bayesian-adjusted combined probability (prior + observed tier win rate). */
+  mlAdjustedProbability?: number | null;
+  /** Number of historical settled parlays of this tier backing the Bayesian. */
+  mlSampleCount?: number | null;
+}
+
+// ── ML helpers (mirror of src/lib/learning/parlay-ml.ts mlScoreToGrade) ──────
+function mlScoreToGrade(score: number): { grade: string; color: string; label: string } {
+  if (score >= 0.85) return { grade: "A+", color: "emerald", label: "Elite" };
+  if (score >= 0.75) return { grade: "A", color: "emerald", label: "Strong" };
+  if (score >= 0.60) return { grade: "B", color: "lime", label: "Good" };
+  if (score >= 0.45) return { grade: "C", color: "amber", label: "Speculative" };
+  return { grade: "D", color: "rose", label: "Weak" };
+}
+
+const GRADE_COLOR_CLASS: Record<string, string> = {
+  emerald: "border-emerald-400 text-emerald-700 dark:text-emerald-300 bg-emerald-500/10",
+  lime: "border-lime-400 text-lime-700 dark:text-lime-300 bg-lime-500/10",
+  amber: "border-amber-400 text-amber-700 dark:text-amber-300 bg-amber-500/10",
+  rose: "border-rose-400 text-rose-700 dark:text-rose-300 bg-rose-500/10",
+};
+
+/** Parse mlComponentsJson safely. Returns null on parse failure. */
+function parseMLComponents(json: string | null | undefined): {
+  parlayMLScore: number | null;
+  bayesianAdjustedProb: number;
+  sampleCount: number;
+  legs: Array<{
+    predictionId: string;
+    matchLabel: string;
+    market: string;
+    selection: string;
+    reliability: number | null;
+    calibratedProb: number | null;
+    adjustedProb: number | null;
+    components: Record<string, number> | null;
+  }>;
+} | null {
+  if (!json) return null;
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
 }
 
 const TYPE_META: Record<
@@ -171,6 +220,15 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
   const ev = parlay.expectedValue;
   const hasKelly = parlay.recommendedStake !== null && parlay.recommendedStake !== undefined && parlay.recommendedStake > 0;
 
+  // ── ML signals ──────────────────────────────────────────────────────────
+  const mlScore = parlay.mlScore ?? null;
+  const mlGrade = mlScore !== null ? mlScoreToGrade(mlScore) : null;
+  const mlComponents = parseMLComponents(parlay.mlComponentsJson);
+  const mlSampleCount = parlay.mlSampleCount ?? 0;
+  const mlAdjustedProb = parlay.mlAdjustedProbability ?? null;
+  // ML badge shows when we have either a score or learning samples
+  const showMLBadge = mlGrade !== null || mlSampleCount > 0;
+
   // ── Live parlay status (from /api/scores/live) ─────────────────────────
   // Falls back to the persisted `evaluated`/`won` flags when live data isn't
   // available (e.g. before any refresh has happened, or for past dates).
@@ -209,6 +267,32 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
             </div>
           </div>
           <div className="flex items-center gap-1.5 flex-wrap justify-end">
+            {/* ML safety grade — shown when ML signals are present */}
+            {showMLBadge && mlGrade && (
+              <Badge
+                variant="outline"
+                className={cn(
+                  "text-[10px] gap-1 font-bold uppercase tracking-wider",
+                  GRADE_COLOR_CLASS[mlGrade.color] ?? "border-muted text-muted-foreground"
+                )}
+                title={
+                  mlScore !== null
+                    ? `ML reliability: ${(mlScore * 100).toFixed(1)}% (${mlGrade.label})\n` +
+                      `Bayesian-adjusted prob: ${mlAdjustedProb !== null ? (mlAdjustedProb * 100).toFixed(1) + "%" : "—"}\n` +
+                      `Learning samples: ${mlSampleCount} settled ${mlSampleCount === 1 ? "parlay" : "parlays"} of this tier\n` +
+                      `Components: prob·consensus·disagreement·market-CLV·source-Brier·source-CLV·tier-history`
+                    : `Learning samples: ${mlSampleCount}`
+                }
+              >
+                <Brain className="h-3 w-3" />
+                ML {mlGrade.grade}
+              </Badge>
+            )}
+            {showMLBadge && mlSampleCount > 0 && (
+              <Badge variant="outline" className="text-[9px] gap-0.5 font-mono">
+                {mlSampleCount} samp
+              </Badge>
+            )}
             {statusBadge && (
               <Badge
                 variant={statusBadge.variant}
@@ -244,6 +328,11 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
           const legIsLive = legLive?.matchStatus === "live";
           const hasScore = legLive?.homeScore !== null && legLive?.homeScore !== undefined && legLive?.awayScore !== null && legLive?.awayScore !== undefined;
 
+          // Per-leg ML reliability (from mlComponentsJson)
+          const legML = mlComponents?.legs?.find((l) => l.predictionId === leg.predictionId);
+          const legReliability = legML?.reliability ?? null;
+          const legGrade = legReliability !== null ? mlScoreToGrade(legReliability) : null;
+
           return (
             <div
               key={leg.predictionId}
@@ -266,6 +355,36 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
                 <div className="text-xs text-muted-foreground truncate flex items-center gap-1.5">
                   <span className="uppercase tracking-wide">{leg.market.replace(/_/g, " ")}:</span>
                   <span className="font-medium">{leg.selection}</span>
+                  {/* Per-leg ML reliability grade */}
+                  {legGrade && (
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "text-[8px] h-3.5 px-1 font-bold gap-0.5",
+                        GRADE_COLOR_CLASS[legGrade.color] ?? "border-muted text-muted-foreground"
+                      )}
+                      title={
+                        legReliability !== null
+                          ? `ML reliability: ${(legReliability * 100).toFixed(1)}%\n` +
+                            `Calibrated prob: ${legML?.calibratedProb !== null && legML?.calibratedProb !== undefined ? (legML.calibratedProb * 100).toFixed(1) + "%" : "—"}\n` +
+                            `Adjusted prob: ${legML?.adjustedProb !== null && legML?.adjustedProb !== undefined ? (legML.adjustedProb * 100).toFixed(1) + "%" : "—"}\n` +
+                            (legML?.components
+                              ? `Components:\n` +
+                                `  prob:          ${(legML.components.prob * 100).toFixed(0)}%\n` +
+                                `  consensus:     ${(legML.components.consensus * 100).toFixed(0)}%\n` +
+                                `  lowDisagree:   ${(legML.components.lowDisagreement * 100).toFixed(0)}%\n` +
+                                `  marketClv:     ${(legML.components.marketClv * 100).toFixed(0)}%\n` +
+                                `  sourceBrier:   ${(legML.components.sourceBrier * 100).toFixed(0)}%\n` +
+                                `  sourceClv:     ${(legML.components.sourceClv * 100).toFixed(0)}%\n` +
+                                `  tierHistory:   ${(legML.components.tierHistory * 100).toFixed(0)}%`
+                              : "")
+                          : undefined
+                      }
+                    >
+                      <Brain className="h-2.5 w-2.5" />
+                      {legGrade.grade}
+                    </Badge>
+                  )}
                   {hasScore && (
                     <Badge
                       variant="outline"
@@ -313,8 +432,27 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
             <div className="text-base font-bold text-primary">{parlay.confidence}%</div>
           </div>
           <div>
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Win Prob.</div>
-            <div className="text-base font-bold">{(parlay.combinedProbability * 100).toFixed(1)}%</div>
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Win Prob.{mlAdjustedProb !== null && mlSampleCount > 0 ? " (ML adj.)" : ""}
+            </div>
+            <div className="text-base font-bold flex items-center gap-1">
+              {(parlay.combinedProbability * 100).toFixed(1)}%
+              {mlAdjustedProb !== null && mlSampleCount > 0 && (
+                <span
+                  className={cn(
+                    "text-[10px] font-mono",
+                    mlAdjustedProb > parlay.combinedProbability
+                      ? "text-emerald-600 dark:text-emerald-400"
+                      : mlAdjustedProb < parlay.combinedProbability
+                        ? "text-rose-600 dark:text-rose-400"
+                        : "text-muted-foreground"
+                  )}
+                  title={`Bayesian-adjusted using ${mlSampleCount} settled ${mlSampleCount === 1 ? "parlay" : "parlays"} of this tier.\nPrior (math): ${(parlay.combinedProbability * 100).toFixed(1)}%\nPosterior: ${(mlAdjustedProb * 100).toFixed(1)}%`}
+                >
+                  → {(mlAdjustedProb * 100).toFixed(1)}%
+                </span>
+              )}
+            </div>
           </div>
           <div>
             <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Exp. Value</div>
@@ -330,6 +468,23 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
             </div>
           </div>
         </div>
+
+        {/* ML self-learning footer — shows when Bayesian adjustment is active */}
+        {mlSampleCount > 0 && mlAdjustedProb !== null && (
+          <div className="flex items-center justify-between gap-2 pt-1 px-3 pb-1 text-[10px] text-muted-foreground">
+            <div className="flex items-center gap-1.5">
+              <Brain className="h-3 w-3 text-violet-500" />
+              <span>
+                ML self-learning active · {mlSampleCount} settled {mlSampleCount === 1 ? "parlay" : "parlays"} of this tier
+                {mlAdjustedProb < parlay.combinedProbability
+                  ? " · stakes reduced (tier underperforming math)"
+                  : mlAdjustedProb > parlay.combinedProbability
+                    ? " · stakes boosted (tier outperforming math)"
+                    : " · stakes match math (tier performing as expected)"}
+              </span>
+            </div>
+          </div>
+        )}
 
         {hasKelly && (
           <div className="flex items-center justify-between gap-2 pt-2 mt-1 border-t border-blue-400/30 bg-blue-400/5 px-3 py-2 rounded-md">

@@ -572,6 +572,7 @@ export async function processResultsForDate(dateStr: string): Promise<{
     let allWon = true;
     let anyLost = false;
     let pendingLegs = 0;
+    let legsWon = 0;
     for (const leg of legs) {
       const legMatch = await db.match.findUnique({ where: { id: leg.matchId } });
       // ── Don't settle a parlay until ALL legs have final scores ──────────
@@ -593,7 +594,9 @@ export async function processResultsForDate(dateStr: string): Promise<{
         cards: legMatch.cards ?? undefined,
       };
       const won = evaluatePrediction(leg, r, legMatch.homeTeam, legMatch.awayTeam);
-      if (!won) {
+      if (won) {
+        legsWon++;
+      } else {
         anyLost = true;
         allWon = false;
       }
@@ -607,10 +610,30 @@ export async function processResultsForDate(dateStr: string): Promise<{
       // legs are settled so the `won` flag is final, not provisional.
       continue;
     }
+    const parlayWon = anyLost ? false : allWon;
     await db.parlay.update({
       where: { id: parlay.id },
-      data: { evaluated: true, won: anyLost ? false : allWon },
+      data: { evaluated: true, won: parlayWon },
     });
+
+    // ── ML: update per-tier historical stats so the next parlay build can ──
+    // use Bayesian shrinkage with this observed result. This is the
+    // self-learning loop: every settled parlay feeds back into the tier's
+    // rolling win rate, which then adjusts the next parlay's combined
+    // probability + Kelly stake.
+    try {
+      const { updateParlayTierStats } = await import("./parlay-ml");
+      await updateParlayTierStats(
+        parlay.type,
+        parlayWon,
+        legs.length,
+        legsWon,
+        parlay.combinedProbability,
+        dateStr
+      );
+    } catch (err) {
+      console.warn("[feedback] ParlayTierStats update failed:", err);
+    }
   }
 
   // Compute daily performance snapshot (with Brier, Kelly ROI, CLV)
