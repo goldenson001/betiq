@@ -326,7 +326,19 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
           const legLost = legLive?.decided && !legLive?.won;
           const legPending = !legLive || !legLive.decided;
           const legIsLive = legLive?.matchStatus === "live";
-          const hasScore = legLive?.homeScore !== null && legLive?.homeScore !== undefined && legLive?.awayScore !== null && legLive?.awayScore !== undefined;
+          // Defensive: never render a score for scheduled / postponed / cancelled
+          // matches. Same pattern as match-card.tsx — even if the live-scores
+          // endpoint or DB has stale 0/0 scores for an unplayed match, the UI
+          // must NOT show them as a real score. Only live and finished matches
+          // are allowed to display a score badge.
+          const legMatchPlayed =
+            legLive?.matchStatus === "live" || legLive?.matchStatus === "finished";
+          const hasScore =
+            legMatchPlayed &&
+            legLive?.homeScore !== null &&
+            legLive?.homeScore !== undefined &&
+            legLive?.awayScore !== null &&
+            legLive?.awayScore !== undefined;
 
           // Per-leg ML reliability (from mlComponentsJson)
           const legML = mlComponents?.legs?.find((l) => l.predictionId === leg.predictionId);

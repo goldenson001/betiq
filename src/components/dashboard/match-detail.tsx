@@ -128,6 +128,12 @@ export function MatchDetailDialog({ match, open, onOpenChange }: Props) {
     (a, b) => MARKET_ORDER.indexOf(a.market) - MARKET_ORDER.indexOf(b.market) || b.confidence - a.confidence
   );
   const hasResult = match.status === "finished" && match.homeScore !== null && match.awayScore !== null;
+  // Also support live matches in the detail dialog (UX gap — previously only
+  // FT matches showed their score; live matches showed nothing). Defensive:
+  // never render a score for scheduled / postponed / cancelled matches, even
+  // if stale 0/0 values leak into the DB from a scraper bug.
+  const isLive = match.status === "live" && match.homeScore !== null && match.awayScore !== null;
+  const hasScore = hasResult || isLive;
   const h2h = parseH2H(match.h2hJson);
 
   return (
@@ -145,15 +151,27 @@ export function MatchDetailDialog({ match, open, onOpenChange }: Props) {
                 FT {match.homeScore}-{match.awayScore}
               </Badge>
             )}
+            {isLive && (
+              <Badge
+                variant="outline"
+                className="ml-auto text-[10px] border-rose-400 text-rose-600 dark:text-rose-300 gap-1"
+              >
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-rose-500" />
+                </span>
+                LIVE {match.homeScore}-{match.awayScore}
+              </Badge>
+            )}
           </div>
           <DialogTitle className="text-lg sm:text-xl flex items-center justify-between gap-3">
             <span className="truncate text-right flex-1">{match.homeTeam}</span>
             <span className="text-xs uppercase text-muted-foreground shrink-0">vs</span>
             <span className="truncate flex-1">{match.awayTeam}</span>
           </DialogTitle>
-          {hasResult && (
+          {hasScore && (
             <DialogDescription className="text-xs">
-              HT: {match.htHomeScore ?? "?"}-{match.htAwayScore ?? "?"} · Corners: {match.corners ?? "?"} · Cards: {match.cards ?? "?"}
+              {isLive ? "In play" : "HT"}: {match.htHomeScore ?? "?"}-{match.htAwayScore ?? "?"} · Corners: {match.corners ?? "?"} · Cards: {match.cards ?? "?"}
             </DialogDescription>
           )}
         </DialogHeader>
