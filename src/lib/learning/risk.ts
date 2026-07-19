@@ -319,3 +319,226 @@ export function applyRiskGates(
     totalExposure: portfolioResult.totalExposure,
   };
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B5: Daily-loss circuit breaker (REAL-MONEY SAFETY)
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type DailyLossState = "normal" | "degraded" | "halted";
+
+export interface DailyLossContext {
+  /** Fraction of bankroll lost TODAY from already-settled parlays.
+   *  Positive number = net loss. Negative = net profit (good day).
+   *  Example: 0.04 = lost 4% of bankroll today. */
+  todayLossFraction: number;
+  /** Fraction of bankroll currently at-risk in unsettled parlays today.
+   *  Used for diagnostics only — does not affect the decision. */
+  atRiskFraction: number;
+}
+
+export interface DailyLossDecision {
+  state: DailyLossState;
+  /** Stake multiplier to apply to all remaining recommendations TODAY:
+   *    normal   → 1.0
+   *    degraded → DAILY_LOSS_DEGRADED_FACTOR (default 0.3)
+   *    halted   → 0.0
+   */
+  stakeMultiplier: number;
+  /** Human-readable reason — surfaced in UI banner. */
+  reason: string;
+}
+
+/**
+ * Compute the daily-loss circuit breaker state.
+ *
+ * This is SEPARATE from the rolling drawdown breaker (B2) — it reacts to a
+ * single catastrophic day, not a sustained bad regime. Both can be active
+ * simultaneously; the EFFECTIVE multiplier is the MIN of the two (most
+ * conservative wins).
+ *
+ * Transition rules:
+ *   normal → degraded:  todayLossFraction ≥ MAX_DAILY_LOSS_DEGRADE_PCT
+ *   normal → halted:    todayLossFraction ≥ MAX_DAILY_LOSS_HALT_PCT
+ *   degraded → halted:  todayLossFraction ≥ MAX_DAILY_LOSS_HALT_PCT
+ *
+ * No automatic recovery within the same day — once halted, stays halted
+ * until the next pipeline run (next calendar day). This is intentional:
+ * if today is bad enough to halt, we don't try to "make it back" with
+ * later parlays.
+ *
+ * The decision is RESET to "normal" at the start of each new pipeline run
+ * (when the daily loss counter is zeroed).
+ */
+export function computeDailyLossState(ctx: DailyLossContext): DailyLossDecision {
+  const { todayLossFraction, atRiskFraction } = ctx;
+  void atRiskFraction; // diagnostic only
+
+  // Halt check (highest priority)
+  if (todayLossFraction >= ENGINE_CONFIG.MAX_DAILY_LOSS_HALT_PCT) {
+    return {
+      state: "halted",
+      stakeMultiplier: 0.0,
+      reason: `Daily loss at ${(todayLossFraction * 100).toFixed(1)}% of bankroll ` +
+              `(≥ ${(ENGINE_CONFIG.MAX_DAILY_LOSS_HALT_PCT * 100).toFixed(0)}% halt threshold). ` +
+              `All remaining stakes ZEROED for today. Resume next pipeline run.`,
+    };
+  }
+
+  // Degrade check
+  if (todayLossFraction >= ENGINE_CONFIG.MAX_DAILY_LOSS_DEGRADE_PCT) {
+    return {
+      state: "degraded",
+      stakeMultiplier: ENGINE_CONFIG.DAILY_LOSS_DEGRADED_FACTOR,
+      reason: `Daily loss at ${(todayLossFraction * 100).toFixed(1)}% of bankroll ` +
+              `(≥ ${(ENGINE_CONFIG.MAX_DAILY_LOSS_DEGRADE_PCT * 100).toFixed(0)}% threshold). ` +
+              `Remaining stakes reduced to ${(ENGINE_CONFIG.DAILY_LOSS_DEGRADED_FACTOR * 100).toFixed(0)}% of Kelly.`,
+    };
+  }
+
+  return {
+    state: "normal",
+    stakeMultiplier: 1.0,
+    reason: "Daily loss within tolerance. Stakes at full Kelly.",
+  };
+}
+
+/**
+ * Combine the drawdown breaker (B2) and the daily-loss breaker (B5) into a
+ * single effective stake multiplier. The most conservative state wins.
+ *
+ *   If EITHER breaker says "halted" → halted (multiplier 0.0)
+ *   Else if EITHER says "degraded"  → degraded (use the LOWER multiplier)
+ *   Else                            → normal (multiplier 1.0)
+ */
+export function combineRiskStates(
+  drawdown: DrawdownDecision,
+  dailyLoss: DailyLossDecision
+): {
+  state: "normal" | "degraded" | "halted";
+  stakeMultiplier: number;
+  reason: string;
+} {
+  if (drawdown.state === "halted" || dailyLoss.state === "halted") {
+    return {
+      state: "halted",
+      stakeMultiplier: 0.0,
+      reason: drawdown.state === "halted" ? drawdown.reason : dailyLoss.reason,
+    };
+  }
+  if (drawdown.state === "degraded" || dailyLoss.state === "degraded") {
+    return {
+      state: "degraded",
+      stakeMultiplier: Math.min(drawdown.stakeMultiplier, dailyLoss.stakeMultiplier),
+      reason: drawdown.state === "degraded" ? drawdown.reason : dailyLoss.reason,
+    };
+  }
+  return {
+    state: "normal",
+    stakeMultiplier: 1.0,
+    reason: "All risk gates normal. Stakes at full Kelly.",
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B6: Data-quality gate (REAL-MONEY SAFETY)
+// ──────────────────────────────────────────────────────────────────────────────
+
+export interface DataQualityContext {
+  /** Fraction of enabled scrapers that succeeded in the last 24h.
+   *  Example: 0.85 = 85% of scrapers returned fresh data. */
+  scraperSuccessRate: number;
+  /** Fraction of today's matches that have at least 1 prediction.
+   *  Example: 0.75 = 75% of matches have any source covering them. */
+  matchCoverage: number;
+  /** Age of the most recent successful scrape, in hours. */
+  latestScrapeAgeHours: number;
+}
+
+export interface DataQualityDecision {
+  /** true = data is fresh enough to trust stakes.
+   *  false = zero all stakes (parlays still built for visibility). */
+  pass: boolean;
+  /** 0.0 (block) or 1.0 (allow). No partial trust — data quality is binary. */
+  stakeMultiplier: number;
+  /** Human-readable reason — surfaced in UI banner when blocking. */
+  reason: string;
+  /** Per-check breakdown for diagnostics. */
+  checks: {
+    scraperSuccess: { pass: boolean; value: number; threshold: number };
+    matchCoverage: { pass: boolean; value: number; threshold: number };
+    dataFreshness: { pass: boolean; value: number; threshold: number };
+  };
+}
+
+/**
+ * Evaluate whether today's data is fresh and complete enough to recommend
+ * real-money stakes.
+ *
+ * If ANY check fails, returns pass=false and stakeMultiplier=0. Parlays are
+ * still BUILT (so the user can see what the model would have picked) but
+ * NO stakes are recommended — protecting against betting on stale or
+ * partial data.
+ *
+ * The three checks are:
+ *   1. Scraper success rate ≥ MIN_SCRAPER_SUCCESS_RATE
+ *   2. Match coverage ≥ MIN_MATCH_COVERAGE
+ *   3. Most recent scrape age ≤ MAX_DATA_AGE_HOURS
+ */
+export function evaluateDataQuality(ctx: DataQualityContext): DataQualityDecision {
+  const checks = {
+    scraperSuccess: {
+      pass: ctx.scraperSuccessRate >= ENGINE_CONFIG.MIN_SCRAPER_SUCCESS_RATE,
+      value: ctx.scraperSuccessRate,
+      threshold: ENGINE_CONFIG.MIN_SCRAPER_SUCCESS_RATE,
+    },
+    matchCoverage: {
+      pass: ctx.matchCoverage >= ENGINE_CONFIG.MIN_MATCH_COVERAGE,
+      value: ctx.matchCoverage,
+      threshold: ENGINE_CONFIG.MIN_MATCH_COVERAGE,
+    },
+    dataFreshness: {
+      pass: ctx.latestScrapeAgeHours <= ENGINE_CONFIG.MAX_DATA_AGE_HOURS,
+      value: ctx.latestScrapeAgeHours,
+      threshold: ENGINE_CONFIG.MAX_DATA_AGE_HOURS,
+    },
+  };
+
+  const allPass = checks.scraperSuccess.pass && checks.matchCoverage.pass && checks.dataFreshness.pass;
+
+  if (allPass) {
+    return {
+      pass: true,
+      stakeMultiplier: 1.0,
+      reason: "Data quality checks passed.",
+      checks,
+    };
+  }
+
+  // Build a reason listing which checks failed
+  const failed: string[] = [];
+  if (!checks.scraperSuccess.pass) {
+    failed.push(
+      `scraper success ${(checks.scraperSuccess.value * 100).toFixed(0)}% ` +
+      `< ${(checks.scraperSuccess.threshold * 100).toFixed(0)}%`
+    );
+  }
+  if (!checks.matchCoverage.pass) {
+    failed.push(
+      `match coverage ${(checks.matchCoverage.value * 100).toFixed(0)}% ` +
+      `< ${(checks.matchCoverage.threshold * 100).toFixed(0)}%`
+    );
+  }
+  if (!checks.dataFreshness.pass) {
+    failed.push(
+      `latest scrape ${checks.dataFreshness.value.toFixed(1)}h old ` +
+      `> ${checks.dataFreshness.threshold}h`
+    );
+  }
+
+  return {
+    pass: false,
+    stakeMultiplier: 0.0,
+    reason: `Data quality gate FAILED: ${failed.join("; ")}. Stakes zeroed — parlays still visible for review.`,
+    checks,
+  };
+}

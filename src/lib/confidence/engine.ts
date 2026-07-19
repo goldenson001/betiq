@@ -60,6 +60,8 @@ import { loadMarketLeagueClvMap } from "@/lib/learning/feedback";
 import { writePickAudit } from "@/lib/audit/pick-audit";
 import { recordStakeRecommendations, type StakeRecommendation } from "@/lib/audit/stake-ledger";
 import { getBankrollState } from "@/lib/audit/bankroll";
+import { getCombinedRiskState, type CombinedRiskState } from "@/lib/audit/risk-context";
+import { computeDrawdownState, type DrawdownDecision } from "@/lib/learning/risk";
 
 interface ParlayLeg {
   predictionId: string;
@@ -1030,6 +1032,34 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   const bankrollAtTime = bankrollState.bankroll;
   const drawdownStateStr = bankrollState.drawdownState;
 
+  // ── B5 + B6: Compute combined risk state (drawdown + daily-loss + data-quality) ──
+  // The bankroll state's drawdown decision is the B2 layer. We layer on:
+  //   - B5: daily-loss circuit breaker (halts if today's losses exceed threshold)
+  //   - B6: data-quality gate (zeroes stakes if scrapers failed or data is stale)
+  // The combined multiplier is the PRODUCT of all three — most conservative wins.
+  //
+  // Parlays are STILL BUILT AND PERSISTED even when the data-quality gate fails
+  // — the user can see what the model would have picked, but stakes are zeroed
+  // so no real money is recommended on incomplete data.
+  const drawdownDecision: DrawdownDecision = {
+    state: bankrollState.drawdownState,
+    stakeMultiplier: bankrollState.stakeMultiplier,
+    reason: bankrollState.reason,
+  };
+  const combinedRisk: CombinedRiskState = await getCombinedRiskState(
+    dateStr,
+    drawdownDecision,
+    bankrollAtTime
+  );
+  const effectiveStakeMultiplier = combinedRisk.stakeMultiplier;
+
+  if (combinedRisk.state !== "normal") {
+    console.warn(
+      `[parlays] Risk gate active for ${dateStr}: state=${combinedRisk.state} ` +
+      `multiplier=${effectiveStakeMultiplier.toFixed(2)} — ${combinedRisk.reason}`
+    );
+  }
+
   // Build the list of stake recommendations as we persist each parlay — we
   // batch-write them to the StakeLedger after the parlay loop completes.
   const stakeRecommendations: StakeRecommendation[] = [];
@@ -1057,13 +1087,14 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         })
       : null;
 
-    // ── Apply drawdown multiplier to the Kelly stake before persistence ────
-    // The risk gate (computeDrawdownState) returns a multiplier: 1.0 normal,
-    // 0.5 degraded, 0.0 halted. We multiply the recommended stake by this
-    // factor so the UI shows the ACTUAL stake the user should place, not the
-    // theoretical full Kelly.
+    // ── Apply combined risk multiplier to the Kelly stake before persistence ──
+    // The effective multiplier is the product of three risk gates:
+    //   - B2 drawdown breaker (rolling 7-day performance)
+    //   - B5 daily-loss breaker (today's realized losses)
+    //   - B6 data-quality gate (scraper success + match coverage + freshness)
+    // Most conservative wins — if any gate is halted, stake = 0.
     const rawStake = tier.k.recommendedStake;
-    const adjustedStake = rawStake * bankrollState.stakeMultiplier;
+    const adjustedStake = rawStake * effectiveStakeMultiplier;
 
     const created = await db.parlay.create({
       data: {
@@ -1098,7 +1129,7 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         sampleCount: tier.sampleCount,
         kellyFraction: tier.k.fullKelly,
         recommendedStake: adjustedStake,
-        drawdownState: drawdownStateStr,
+        drawdownState: combinedRisk.state, // combined state, not just drawdown
         portfolioScale: null, // portfolio cap is applied per-pick, not per-parlay
       });
     } catch (err) {
@@ -1118,7 +1149,7 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
         tier: tier.type,
         recommendedStake: adjustedStake,
         combinedOdds: tier.cand.combinedOdds,
-        drawdownState: drawdownStateStr,
+        drawdownState: combinedRisk.state,
         portfolioScale: null,
       });
     }

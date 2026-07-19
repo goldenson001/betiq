@@ -210,6 +210,50 @@ export const ENGINE_CONFIG = {
   // (one source 95%, three sources 50%) from investment-grade recommendations.
   SAFE_HIGH_ODDS_MAX_DISAGREEMENT: num("SAFE_HIGH_ODDS_MAX_DISAGREEMENT", 0.15, 0.02, 0.40),
 
+  // ── Daily-loss circuit breaker (B5 — REAL-MONEY SAFETY) ───────────────────
+  // Hard stop on the CURRENT day's realized losses, independent of the
+  // rolling 7-day drawdown check. The drawdown breaker reacts to a sustained
+  // bad regime; the daily-loss breaker reacts to a SINGLE catastrophic day
+  // (e.g. 5 of 6 parlays all losing on a Saturday where the model misread
+  // a weather event). Without this, a 6-parlay losing day could drain 10%+
+  // of bankroll before the rolling window catches up.
+  //
+  //   MAX_DAILY_LOSS_DEGRADE_PCT — once today's settled losses hit this
+  //   fraction of bankroll (default 3%), reduce all remaining stakes by
+  //   DAILY_LOSS_DEGRADED_FACTOR (default 0.3 = keep 30% of Kelly).
+  //
+  //   MAX_DAILY_LOSS_HALT_PCT — once today's settled losses hit this
+  //   fraction (default 5%), ZERO all remaining stakes for the day. Manual
+  //   review required before resuming (next day's pipeline auto-resumes).
+  //
+  // The 3% / 5% defaults are calibrated for a 1/8 fractional Kelly bankroll
+  // where each parlay stakes ~1-2% of bankroll. Tighten for conservative
+  // operations; loosen for higher risk tolerance.
+  MAX_DAILY_LOSS_DEGRADE_PCT: num("MAX_DAILY_LOSS_DEGRADE_PCT", 0.03, 0.01, 0.10),
+  MAX_DAILY_LOSS_HALT_PCT: num("MAX_DAILY_LOSS_HALT_PCT", 0.05, 0.02, 0.15),
+  DAILY_LOSS_DEGRADED_FACTOR: num("DAILY_LOSS_DEGRADED_FACTOR", 0.3, 0.0, 1.0),
+
+  // ── Data-quality gate (B6 — REAL-MONEY SAFETY) ───────────────────────────
+  // Before recommending ANY stakes, verify that today's data is fresh and
+  // complete enough to trust. If scrapers failed or coverage is too thin,
+  // we still BUILD parlays (so the user can see them) but ZERO all stakes
+  // — protecting against betting on stale or partial data.
+  //
+  //   MIN_SCRAPER_SUCCESS_RATE — fraction of enabled scrapers that must
+  //   have succeeded in the last 24h. Default 0.70 — at least 70% of
+  //   sources must have fresh data. Below this, stakes are zeroed.
+  //
+  //   MIN_MATCH_COVERAGE — minimum ratio of (matches with ≥1 prediction)
+  //   to (total matches today). Default 0.60 — at least 60% of today's
+  //   fixtures must have at least one source covering them.
+  //
+  //   MAX_DATA_AGE_HOURS — max age of the most recent successful scrape.
+  //   Default 24h. If the most recent successful scrape is older than this,
+  //   stakes are zeroed (data is stale).
+  MIN_SCRAPER_SUCCESS_RATE: num("MIN_SCRAPER_SUCCESS_RATE", 0.70, 0.30, 1.0),
+  MIN_MATCH_COVERAGE: num("MIN_MATCH_COVERAGE", 0.60, 0.20, 1.0),
+  MAX_DATA_AGE_HOURS: num("MAX_DATA_AGE_HOURS", 24, 6, 72),
+
   // ── Diagnostics ────────────────────────────────────────────────────────────
   LOG_ENGINE_DECISIONS: bool("LOG_ENGINE_DECISIONS", false),
 } as const;
