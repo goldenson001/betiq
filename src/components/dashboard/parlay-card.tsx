@@ -419,6 +419,18 @@ export function ParlayCard({ parlay }: { parlay: ParlayView }) {
                       {legLive!.homeScore}-{legLive!.awayScore}
                     </Badge>
                   )}
+                  {/* To-be-played badge for legs whose match hasn't kicked off.
+                      Shows explicitly that the leg is still pending — no score
+                      should be displayed until the match is actually played. */}
+                  {!hasScore && legPending && !legIsLive && (
+                    <Badge
+                      variant="outline"
+                      className="text-[9px] h-4 px-1 font-semibold ml-auto text-muted-foreground border-muted-foreground/30"
+                      title="To be played — match has not kicked off yet"
+                    >
+                      TBP
+                    </Badge>
+                  )}
                 </div>
               </div>
               <div className="text-right shrink-0 flex items-center gap-2">

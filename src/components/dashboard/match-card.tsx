@@ -106,6 +106,15 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
                 LIVE {match.homeScore}-{match.awayScore}
               </Badge>
             )}
+            {!hasResult && !isLive && (
+              <Badge
+                variant="outline"
+                className="text-[10px] font-semibold text-muted-foreground border-muted-foreground/30"
+                title="To be played — kickoff time shown on the left"
+              >
+                TBP
+              </Badge>
+            )}
             <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
           </div>
         </div>
@@ -139,9 +148,17 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
           </div>
           <div className={
             "text-[10px] uppercase tracking-wider text-muted-foreground px-1.5 py-0.5 rounded font-semibold shrink-0 " +
-            (hasScore ? "bg-rose-100 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300" : "bg-muted")
+            (hasResult
+              ? "bg-rose-100 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300"
+              : isLive
+                ? "bg-rose-100 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300"
+                : "bg-muted")
           }>
-            {hasScore ? `${match.homeScore}-${match.awayScore}` : "v"}
+            {hasResult
+              ? `${match.homeScore}-${match.awayScore}`
+              : isLive
+                ? `${match.homeScore}-${match.awayScore}`
+                : "TBP"}
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-sm font-bold truncate">{match.awayTeam}</div>

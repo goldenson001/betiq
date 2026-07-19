@@ -163,6 +163,15 @@ export function MatchDetailDialog({ match, open, onOpenChange }: Props) {
                 LIVE {match.homeScore}-{match.awayScore}
               </Badge>
             )}
+            {!hasScore && (
+              <Badge
+                variant="outline"
+                className="ml-auto text-[10px] text-muted-foreground border-muted-foreground/30"
+                title="To be played — kickoff time shown on the left"
+              >
+                To be played
+              </Badge>
+            )}
           </div>
           <DialogTitle className="text-lg sm:text-xl flex items-center justify-between gap-3">
             <span className="truncate text-right flex-1">{match.homeTeam}</span>
@@ -172,6 +181,11 @@ export function MatchDetailDialog({ match, open, onOpenChange }: Props) {
           {hasScore && (
             <DialogDescription className="text-xs">
               {isLive ? "In play" : "HT"}: {match.htHomeScore ?? "?"}-{match.htAwayScore ?? "?"} · Corners: {match.corners ?? "?"} · Cards: {match.cards ?? "?"}
+            </DialogDescription>
+          )}
+          {!hasScore && (
+            <DialogDescription className="text-xs text-muted-foreground">
+              Kickoff: {match.kickoffBrussels ?? "TBD"} · Status: scheduled (not yet played)
             </DialogDescription>
           )}
         </DialogHeader>
