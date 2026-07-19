@@ -53,7 +53,14 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
   );
   const hasResult = match.status === "finished" && match.homeScore !== null && match.awayScore !== null;
   const isLive = match.status === "live" && match.homeScore !== null && match.awayScore !== null;
-  const hasScore = match.homeScore !== null && match.awayScore !== null;
+  // Defensive: never render a score for scheduled / postponed / cancelled matches.
+  // Even if a scraper bug (or stale DB row) leaks homeScore=0/awayScore=0 into
+  // a scheduled match, the UI must NOT show it as a real score. Only live and
+  // finished matches are allowed to display a score block.
+  const hasScore =
+    match.homeScore !== null &&
+    match.awayScore !== null &&
+    (match.status === "live" || match.status === "finished");
   const avgConfidence =
     match.predictions.length > 0
       ? Math.round(match.predictions.reduce((s, p) => s + p.confidence, 0) / match.predictions.length)
@@ -97,11 +104,6 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
                   <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-rose-500"></span>
                 </span>
                 LIVE {match.homeScore}-{match.awayScore}
-              </Badge>
-            )}
-            {!hasResult && !isLive && hasScore && (
-              <Badge variant="outline" className="text-[10px] font-semibold">
-                {match.homeScore}-{match.awayScore}
               </Badge>
             )}
             <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />

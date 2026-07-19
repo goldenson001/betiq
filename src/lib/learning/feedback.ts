@@ -265,7 +265,19 @@ export async function processResultsForDate(dateStr: string): Promise<{
   const byExternalId = new Map(espnResults.map((r) => [r.externalId, r]));
 
   const matches = await db.match.findMany({
-    where: { matchDate: dateStr, resultProcessed: false, status: { not: "postponed" } },
+    where: {
+      matchDate: dateStr,
+      resultProcessed: false,
+      // ── Only evaluate predictions against the REAL final result.
+      // Previously this was `status: { not: "postponed" }` which let in
+      // scheduled, live, and cancelled matches. Combined with the legacy
+      // bug where the live-scores endpoint wrote homeScore=0/awayScore=0
+      // to scheduled matches, the feedback loop would silently evaluate
+      // predictions against a fake 0-0 — corrupting source accuracy stats
+      // and marking predictions as `evaluated=true` so they could never be
+      // re-evaluated against the real result. Restrict to "finished" only.
+      status: "finished",
+    },
     include: { predictions: true, rawPredictions: true },
   });
 

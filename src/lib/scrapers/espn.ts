@@ -931,14 +931,37 @@ export async function fetchEspnResults(
         if (!Number.isNaN(v)) htAwayScore = v;
       }
 
+      // ── Pre-match score guard ─────────────────────────────────────────────
+      // ESPN's scoreboard returns competitor.score = "0" for BOTH sides of
+      // pre-match (state === "pre") matches — this is ESPN's placeholder for
+      // "no score yet", not an actual 0-0 result. If we pass it through as a
+      // numeric 0, the live-scores endpoint will write homeScore=0/awayScore=0
+      // to the DB for scheduled matches, and the UI will render a "0-0"
+      // fulltime-style box on matches that haven't kicked off.
+      //
+      // Fix: only trust ESPN's score values when the match is actually in
+      // play (state === "in") or finished (state === "post"). For pre-match
+      // and any unusual unknown state, force scores to null.
+      const isScoreable = status === "live" || status === "finished";
+      const finalHomeScore = isScoreable ? homeScore : null;
+      const finalAwayScore = isScoreable ? awayScore : null;
+      const finalHtHomeScore = isScoreable ? htHomeScore : null;
+      const finalHtAwayScore = isScoreable ? htAwayScore : null;
+
       results.push({
         externalId: makeExternalId(targetDate, homeTeam, awayTeam),
         homeTeam,
         awayTeam,
-        homeScore: Number.isNaN(homeScore as number) ? null : homeScore,
-        awayScore: Number.isNaN(awayScore as number) ? null : awayScore,
-        htHomeScore,
-        htAwayScore,
+        homeScore:
+          finalHomeScore === null || Number.isNaN(finalHomeScore as number)
+            ? null
+            : finalHomeScore,
+        awayScore:
+          finalAwayScore === null || Number.isNaN(finalAwayScore as number)
+            ? null
+            : finalAwayScore,
+        htHomeScore: finalHtHomeScore,
+        htAwayScore: finalHtAwayScore,
         status,
       });
     }

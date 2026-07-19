@@ -153,13 +153,21 @@ export async function GET(req: NextRequest): Promise<NextResponse<ScoresLiveResp
       m.status !== effectiveStatus;
     if (!needsUpdate) continue;
 
+    // ── Pre-match score guard (defensive) ──────────────────────────────────
+    // Even if a future ESPN payload bug (or stale cache) sends 0/0 scores for
+    // a scheduled match, NEVER persist scores to a scheduled row — otherwise
+    // the UI will render "0-0" fulltime-style boxes on matches that haven't
+    // kicked off. Only write scores for matches that are actually live or
+    // finished.
+    const shouldWriteScores = effectiveStatus === "live" || effectiveStatus === "finished";
+
     await db.match.update({
       where: { id: m.id },
       data: {
-        homeScore: espn.homeScore,
-        awayScore: espn.awayScore,
-        htHomeScore: espn.htHomeScore,
-        htAwayScore: espn.htAwayScore,
+        homeScore: shouldWriteScores ? espn.homeScore : null,
+        awayScore: shouldWriteScores ? espn.awayScore : null,
+        htHomeScore: shouldWriteScores ? espn.htHomeScore : null,
+        htAwayScore: shouldWriteScores ? espn.htAwayScore : null,
         status: effectiveStatus,
       },
     });
