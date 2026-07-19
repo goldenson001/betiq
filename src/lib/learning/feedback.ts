@@ -268,15 +268,16 @@ export async function processResultsForDate(dateStr: string): Promise<{
     where: {
       matchDate: dateStr,
       resultProcessed: false,
-      // ── Only evaluate predictions against the REAL final result.
-      // Previously this was `status: { not: "postponed" }` which let in
-      // scheduled, live, and cancelled matches. Combined with the legacy
-      // bug where the live-scores endpoint wrote homeScore=0/awayScore=0
-      // to scheduled matches, the feedback loop would silently evaluate
-      // predictions against a fake 0-0 — corrupting source accuracy stats
-      // and marking predictions as `evaluated=true` so they could never be
-      // re-evaluated against the real result. Restrict to "finished" only.
-      status: "finished",
+      // ── Source of truth is ESPN, not the DB status field.
+      // The DB status of a match is set by /api/scores/live when a user has
+      // the dashboard open. If a match finishes overnight with no user
+      // activity, the DB row stays "scheduled" — and a `status: "finished"`
+      // filter here would block us from ever picking it up. Instead, we
+      // fetch ALL unprocessed matches for the date and let ESPN tell us
+      // (inside the per-match loop below) whether each one is actually
+      // finished, scheduled, live, postponed, or cancelled. ESPN-confirmed
+      // finished matches get their DB status + scores self-healed so the
+      // dashboard reflects reality on the next page load.
     },
     include: { predictions: true, rawPredictions: true },
   });
@@ -307,8 +308,61 @@ export async function processResultsForDate(dateStr: string): Promise<{
     const espn = byExternalId.get(match.externalId);
     let result: MatchResult;
 
-    if (match.homeScore !== null && match.awayScore !== null) {
-      // Already populated
+    // ── ESPN is the source of truth for match status & scores ───────────────
+    // The DB status of a match is updated by /api/scores/live when a user
+    // has the dashboard open. If a match finished overnight with no user
+    // activity, the DB row will still say "scheduled" — but ESPN will tell
+    // us the truth. Self-heal the DB row from ESPN before evaluating, so:
+    //   (a) predictions get evaluated against the REAL final result
+    //   (b) the dashboard reflects the correct status + FT score on the
+    //       next page load, even if no one was watching when it finished
+    if (espn && espn.status === "finished" && espn.homeScore !== null && espn.awayScore !== null) {
+      // ESPN confirms the match is finished with real scores.
+      // Self-heal the DB row if it's stale (different status or scores).
+      const dbNeedsHeal =
+        match.status !== "finished" ||
+        match.homeScore !== espn.homeScore ||
+        match.awayScore !== espn.awayScore ||
+        match.htHomeScore !== (espn.htHomeScore ?? null) ||
+        match.htAwayScore !== (espn.htAwayScore ?? null);
+      if (dbNeedsHeal) {
+        await db.match.update({
+          where: { id: match.id },
+          data: {
+            status: "finished",
+            homeScore: espn.homeScore,
+            awayScore: espn.awayScore,
+            htHomeScore: espn.htHomeScore ?? null,
+            htAwayScore: espn.htAwayScore ?? null,
+          },
+        });
+      }
+      result = {
+        homeScore: espn.homeScore,
+        awayScore: espn.awayScore,
+        htHomeScore: espn.htHomeScore ?? undefined,
+        htAwayScore: espn.htAwayScore ?? undefined,
+        corners: match.corners ?? undefined,
+        cards: match.cards ?? undefined,
+      };
+    } else if (espn && (espn.status === "postponed" || espn.status === "cancelled")) {
+      // Persist the status change so the dashboard reflects reality, and
+      // mark the match as processed — there is no real result to evaluate
+      // against, so we shouldn't keep retrying it forever. Predictions on
+      // this match will never be marked `evaluated=true`, which is correct:
+      // the parlay settlement logic treats postponed/cancelled legs as
+      // `won=false` (per /api/scores/live parlay status logic).
+      if (match.status !== espn.status || !match.resultProcessed) {
+        await db.match.update({
+          where: { id: match.id },
+          data: { status: espn.status, resultProcessed: true },
+        });
+      }
+      continue;
+    } else if (match.homeScore !== null && match.awayScore !== null && match.status === "finished") {
+      // Fallback: DB already has a confirmed finished result (e.g., set
+      // manually) and ESPN didn't return anything for this match. Use the
+      // DB values so we don't block the feedback loop on ESPN outages.
       result = {
         homeScore: match.homeScore,
         awayScore: match.awayScore,
@@ -317,27 +371,10 @@ export async function processResultsForDate(dateStr: string): Promise<{
         corners: match.corners ?? undefined,
         cards: match.cards ?? undefined,
       };
-    } else if (espn && espn.homeScore !== null && espn.awayScore !== null) {
-      // Real ESPN result
-      result = {
-        homeScore: espn.homeScore,
-        awayScore: espn.awayScore,
-        htHomeScore: espn.htHomeScore ?? undefined,
-        htAwayScore: espn.htAwayScore ?? undefined,
-      };
-      await db.match.update({
-        where: { id: match.id },
-        data: {
-          homeScore: espn.homeScore,
-          awayScore: espn.awayScore,
-          htHomeScore: espn.htHomeScore ?? null,
-          htAwayScore: espn.htAwayScore ?? null,
-          status: espn.status === "finished" ? "finished" : match.status,
-        },
-      });
     } else {
-      // ESPN didn't return a final score for this match yet — skip
-      // (will retry on next feedback run). Do NOT mark as processed.
+      // ESPN says scheduled/live, or ESPN didn't return a result and the
+      // DB doesn't have a confirmed finished score. Skip — will retry on
+      // next feedback run. Do NOT mark as processed.
       continue;
     }
 
