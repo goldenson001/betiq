@@ -181,7 +181,10 @@ export async function ensureLeague(name: string, country: string) {
  * The prediction sites are best-effort — if they fail, we still get matches
  * from ESPN with full bookmaker odds and metadata.
  */
-export async function runAllScrapers(targetDate?: string): Promise<{
+export async function runAllScrapers(
+  targetDate?: string,
+  options?: { force?: boolean }
+): Promise<{
   startedAt: Date;
   finishedAt: Date;
   matchesStored: number;
@@ -190,6 +193,7 @@ export async function runAllScrapers(targetDate?: string): Promise<{
 }> {
   await ensureSources();
   const startedAt = new Date();
+  const force = options?.force === true;
 
   // Run all scrapers in parallel
   const results = await Promise.allSettled(SOURCES.map((s) => s.scrape(targetDate)));
@@ -288,12 +292,24 @@ export async function runAllScrapers(targetDate?: string): Promise<{
       matchIdByExternalId.set(m.externalId, match.id);
       matchesStored++;
 
-      // Store ESPN's per-source prediction (with REAL bookmaker odds)
+      // Store ESPN's per-source prediction (with REAL bookmaker odds).
+      // ── Immutability guard ─────────────────────────────────────────────────
+      // Once a raw prediction is stored, it must NOT be overwritten by
+      // subsequent scrapes — the user may have already seen and acted on the
+      // originally-displayed pick, and the feedback loop evaluates the
+      // originally-stored pick, not whatever the source says 6 hours later.
+      // Default (force=false): create-only; skip if exists. Force=true:
+      // overwrite payloadJson + predicted1X2/etc., preserving
+      // evaluated/correct (legacy behavior, admin-only).
       const payloadJson = JSON.stringify(item.prediction);
       const existingRaw = await db.rawPrediction.findFirst({
         where: { matchId: match.id, sourceId: source.id },
       });
-      if (existingRaw) {
+      if (existingRaw && !force) {
+        // Already stored — leave the original pick intact.
+        continue;
+      }
+      if (existingRaw && force) {
         await db.rawPrediction.update({
           where: { id: existingRaw.id },
           data: {
@@ -344,7 +360,14 @@ export async function runAllScrapers(targetDate?: string): Promise<{
       const existingRaw = await db.rawPrediction.findFirst({
         where: { matchId, sourceId: source.id },
       });
-      if (existingRaw) {
+      // ── Immutability guard (same as Phase 1) ───────────────────────────────
+      // Once stored, a raw prediction is frozen — its originally-displayed pick
+      // is what the feedback loop evaluates. Skip if exists (default) or
+      // overwrite payload + pick fields (force=true, admin-only).
+      if (existingRaw && !force) {
+        continue;
+      }
+      if (existingRaw && force) {
         await db.rawPrediction.update({
           where: { id: existingRaw.id },
           data: {

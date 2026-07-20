@@ -79,19 +79,30 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const date = searchParams.get("date") ?? brusselsDateString();
   const phase = searchParams.get("phase") ?? "all";
+  // ── Force flag (admin-only escape hatch) ─────────────────────────────────
+  // Default behavior is now idempotent: if predictions / parlays already
+  // exist for the date, they are NOT overwritten (immutability guard — the
+  // user wants picks to stay static after they're first displayed).
+  //
+  // Pass `?force=true` to bypass the guard and rebuild from scratch. This is
+  // admin-only and should NEVER be used on a date whose matches have already
+  // been played — it would wipe evaluation results (evaluated/correct/clv).
+  // Safe to use before kickoff if you want to refresh picks after a scraper
+  // bug fix or a source-weight recalibration.
+  const force = searchParams.get("force") === "true";
 
   try {
     if (phase === "scrape") {
-      const result = await runAllScrapers(date);
-      return NextResponse.json({ ok: true, phase, date, result });
+      const result = await runAllScrapers(date, { force });
+      return NextResponse.json({ ok: true, phase, date, force, result });
     }
     if (phase === "predict") {
-      const result = await generatePredictionsForDate(date);
-      return NextResponse.json({ ok: true, phase, date, result });
+      const result = await generatePredictionsForDate(date, { force });
+      return NextResponse.json({ ok: true, phase, date, force, result });
     }
     if (phase === "parlays") {
-      const result = await buildAndPersistParlays(date);
-      return NextResponse.json({ ok: true, phase, date, result });
+      const result = await buildAndPersistParlays(date, { force });
+      return NextResponse.json({ ok: true, phase, date, force, result });
     }
     if (phase === "feedback") {
       const result = await runFeedbackLoopForUnprocessedDates();
@@ -109,14 +120,14 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: true, phase, date, result });
     }
     // all
-    const result = await runDailyPipeline(date);
+    const result = await runDailyPipeline(date, { force });
     // Update last-run marker
     await db.modelState.upsert({
       where: { key: "last_pipeline_run_date" },
       create: { key: "last_pipeline_run_date", value: parseFloat(date.replace(/-/g, "")), notes: date },
       update: { value: parseFloat(date.replace(/-/g, "")), notes: date },
     });
-    return NextResponse.json({ ok: true, phase, date, result });
+    return NextResponse.json({ ok: true, phase, date, force, result });
   } catch (err) {
     const { status, body } = friendlyError(err);
     return NextResponse.json(body, { status });

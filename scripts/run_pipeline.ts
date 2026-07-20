@@ -23,8 +23,9 @@ async function main() {
   const args = process.argv.slice(2);
   const dateArg = args.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a));
   const skipFeedback = args.includes("--no-feedback");
+  const force = args.includes("--force");
   const today = dateArg || brusselsDateString();
-  console.log(`[pipeline] Brussels date: ${today}`);
+  console.log(`[pipeline] Brussels date: ${today}  (mode: ${force ? "FORCE — rebuild predictions & parlays" : "idempotent — skip existing predictions"})`);
 
   if (!skipFeedback) {
     console.log(`[pipeline] Phase 0: running feedback loop for unprocessed dates...`);
@@ -42,7 +43,7 @@ async function main() {
   }
 
   console.log(`[pipeline] Phase 1+2: scraping ESPN + prediction sites...`);
-  const sr = await runAllScrapers(today);
+  const sr = await runAllScrapers(today, { force });
   console.log(
     `[pipeline] Stored ${sr.matchesStored} matches, ${sr.predictionsStored} raw predictions`
   );
@@ -52,13 +53,16 @@ async function main() {
   }
 
   console.log(`[pipeline] Phase 3: aggregating compound predictions...`);
-  const p = await generatePredictionsForDate(today);
+  const p = await generatePredictionsForDate(today, { force });
   console.log(
-    `[pipeline] Generated ${p.predictions} compound predictions across ${p.matches} matches`
+    `[pipeline] Predictions -> ${p.predictions} created, ${p.skipped ?? 0} skipped (already existed), across ${p.matches} matches`
   );
 
   console.log(`[pipeline] Phase 4: building 8 parlay tiers...`);
-  const par = await buildAndPersistParlays(today);
+  const par = await buildAndPersistParlays(today, { force });
+  if (par.skipped) {
+    console.log(`[pipeline] Parlays -> skipped (already exist for ${today})`);
+  }
   const fmt = (name: string, cand: { legs: unknown[] } | null) =>
     `${name}: ${cand?.legs.length ?? 0}`;
   console.log(

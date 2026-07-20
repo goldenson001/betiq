@@ -1814,9 +1814,13 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
  * Per-prediction Kelly stakes are computed for top picks and value bets and
  * persisted alongside the prediction.
  */
-export async function generatePredictionsForDate(dateStr: string): Promise<{
+export async function generatePredictionsForDate(
+  dateStr: string,
+  options?: { force?: boolean }
+): Promise<{
   matches: number;
   predictions: number;
+  skipped?: number;
   riskGate?: {
     drawdownState: DrawdownState;
     stakeMultiplier: number;
@@ -1825,6 +1829,7 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
     reason: string;
   };
 }> {
+  const force = options?.force === true;
   const matches = await db.match.findMany({
     where: { matchDate: dateStr },
     include: {
@@ -1833,6 +1838,7 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
   });
 
   let totalPredictions = 0;
+  let skippedMatches = 0;
 
   // ── Pre-fetch per-league calibration params ────────────────────────────────
   // Collect distinct (sourceId, leagueId) pairs for this date's matches so we
@@ -1913,12 +1919,30 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
   const pending: PendingPrediction[] = [];
 
   for (const match of matches) {
-    // Clear existing predictions for this match (we always rebuild)
+    // ── Immutability guard ───────────────────────────────────────────────────
+    // Once a prediction has been officially made (persisted + displayed), it
+    // must NOT be mutated by subsequent pipeline runs. The user relies on
+    // the values shown at first-display time for their bet tracking — if
+    // confidence / odds / Kelly stake / flags silently shift on the next
+    // refresh, the displayed picks become unreliable.
+    //
+    // Default behavior (force=false): if any predictions already exist for
+    // this match, skip the match entirely. New matches without predictions
+    // still get them; matches with predictions are frozen.
+    //
+    // Escape hatch (force=true): admin can pass `?force=true` to
+    // /api/trigger?phase=predict to rebuild predictions for the date. This
+    // wipes existing predictions for the match (including result fields —
+    // only use when the match has NOT been played yet).
     const existing = await db.prediction.findFirst({
       where: { matchId: match.id },
       select: { id: true },
     });
-    if (existing) {
+    if (existing && !force) {
+      skippedMatches++;
+      continue;
+    }
+    if (existing && force) {
       await db.prediction.deleteMany({ where: { matchId: match.id } });
     }
 
@@ -2084,6 +2108,7 @@ export async function generatePredictionsForDate(dateStr: string): Promise<{
   return {
     matches: matches.length,
     predictions: totalPredictions,
+    skipped: skippedMatches,
     riskGate: {
       drawdownState: drawdownDecision.state,
       stakeMultiplier: drawdownDecision.stakeMultiplier,

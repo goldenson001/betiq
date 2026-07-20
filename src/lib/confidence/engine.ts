@@ -597,7 +597,10 @@ function buildTargetOddsParlay(
 /**
  * Main entry — builds and persists all parlay tiers for a date.
  */
-export async function buildAndPersistParlays(dateStr: string): Promise<{
+export async function buildAndPersistParlays(
+  dateStr: string,
+  options?: { force?: boolean }
+): Promise<{
   safest: ParlayCandidate | null;
   mediumRisk: ParlayCandidate | null;
   highRisk: ParlayCandidate | null;
@@ -606,7 +609,43 @@ export async function buildAndPersistParlays(dateStr: string): Promise<{
   odds3B: ParlayCandidate | null;
   odds5A: ParlayCandidate | null;
   odds5B: ParlayCandidate | null;
+  skipped?: boolean;
 }> {
+  const force = options?.force === true;
+
+  // ── Immutability guard ─────────────────────────────────────────────────────
+  // Parlays are a derived product of predictions. Since predictions are now
+  // immutable once written, parlays that reference them should also be frozen
+  // — otherwise the displayed parlay composition silently shifts on the next
+  // pipeline run, even though the underlying picks haven't changed. The
+  // PickAudit table already captures an immutable snapshot for post-mortem
+  // analysis; this guard ensures the live `Parlay` rows match what the user
+  // saw at first-display time.
+  //
+  // Default (force=false): if any parlays already exist for this date, skip
+  // the rebuild entirely. Force=true: delete-then-recreate (legacy behavior).
+  if (!force) {
+    const existingCount = await db.parlay.count({ where: { matchDate: dateStr } });
+    if (existingCount > 0) {
+      // Reload existing parlays from DB so the caller can confirm what's
+      // persisted. We return null candidates because we can't fully rehydrate
+      // ParlayCandidate (legsJson is the source of truth on the live row, and
+      // the dashboard reads from /api/parlays anyway). The `skipped: true`
+      // flag tells the caller nothing was rebuilt.
+      return {
+        safest: null,
+        mediumRisk: null,
+        highRisk: null,
+        megaOdds: null,
+        odds3A: null,
+        odds3B: null,
+        odds5A: null,
+        odds5B: null,
+        skipped: true,
+      };
+    }
+  }
+
   // Load all predictions for date
   const matches = await db.match.findMany({
     where: { matchDate: dateStr },
