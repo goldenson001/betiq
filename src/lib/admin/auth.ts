@@ -1,85 +1,95 @@
 /**
- * Admin authentication — minimal, env-based, cookie-stored.
+ * Owner authentication — URL-unlock + long-lived cookie.
  *
  * Why this exists:
- *   The user wants a private "won parlay history" view that only the admin can
- *   see. Normal visitors must not see past won parlay records (those are
- *   sensitive business analytics). We implement a deliberately simple admin
- *   gate — a single shared password stored in `ADMIN_PASSWORD` env var, with
- *   a signed session cookie that proves the visitor knew the password.
+ *   The user wants the "Won Parlays History" view to behave like the
+ *   Performance tab — auto-visible to them (the site owner) without typing a
+ *   password every time, but completely hidden from regular visitors.
+ *
+ *   Pattern: the owner sets `SITE_OWNER_TOKEN` in env. Once, they visit
+ *   `/?unlock=<token>` (or any path with `?unlock=<token>`). The server
+ *   validates the token, sets a 10-year HTTP-only cookie `betiq_owner`, and
+ *   redirects to the page without the query param. From then on, that browser
+ *   is permanently "unlocked" — no modal, no login, no friction, exactly
+ *   like the Performance tab being visible only to them.
+ *
+ *   Regular visitors (no cookie) never see the Won History tab, the API
+ *   returns 404, and the underlying fetch never fires.
  *
  * Threat model & scope:
- *   - This is NOT enterprise auth. It is a "curtain" that hides admin-only
- *     analytics from casual visitors / scrapers.
- *   - The session cookie is HMAC-signed with `ADMIN_SESSION_SECRET` so a
- *     visitor cannot forge it by typing `isAdmin=true` in their console.
- *   - All admin API routes must call `requireAdmin(req)` and bail with 401
- *     when the cookie is missing or invalid.
- *   - The password lives in env (never shipped to the client). Default
- *     fallback ("betiq-admin") is allowed ONLY when NODE_ENV !== "production"
- *     so a fresh dev box can log in without setup, but a real deployment
- *     without ADMIN_PASSWORD refuses all admin logins.
+ *   - This is a "soft" gate — a single shared token, not per-user accounts.
+ *   - The cookie is HMAC-signed with `SITE_OWNER_TOKEN` so a visitor cannot
+ *     forge it by editing their cookies.
+ *   - All owner-gated API routes must call `requireOwner(req)` and bail with
+ *     404 (not 401 — we don't even leak that the endpoint exists) when the
+ *     cookie is missing or invalid.
+ *   - In dev (NODE_ENV !== "production"), a default token "owner" is allowed
+ *     so a fresh checkout works without env setup. In prod, no token = no
+ *     unlock = no owner access.
  */
 
 import { cookies } from "next/headers";
 import { NextRequest } from "next/server";
 
-const COOKIE_NAME = "betiq_admin_session";
-// Cookie lifetime: 7 days (in seconds). Sliding — refreshed on each
-// successful requireAdmin call so active admins don't get logged out.
-const COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
+const COOKIE_NAME = "betiq_owner";
+// 10-year cookie lifetime — once unlocked, the owner never has to re-unlock
+// on that device. They can manually clear via ?lock=1 if they want.
+const COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 10;
 
-/** Read the configured admin password, or null when none is set in prod. */
-export function getAdminPassword(): string | null {
-  const pw = process.env.ADMIN_PASSWORD;
-  if (pw && pw.length > 0) return pw;
-  // Dev-only fallback so a fresh checkout can log in without env setup.
-  if (process.env.NODE_ENV !== "production") return "betiq-admin";
+/** Read the configured owner token, or null when none is set in prod. */
+export function getOwnerToken(): string | null {
+  const t = process.env.SITE_OWNER_TOKEN;
+  if (t && t.length > 0) return t;
+  // Dev-only fallback so a fresh checkout can unlock without env setup
+  // by visiting /?unlock=owner
+  if (process.env.NODE_ENV !== "production") return "owner";
   return null;
 }
 
-/** Read the HMAC secret used to sign session cookies. */
-function getSessionSecret(): string {
-  // Prefer explicit env var, fall back to admin password (still secret),
-  // fall back to dev-only constant. In prod without either, we throw so
-  // no admin login can ever succeed — safer than silently unsigned cookies.
-  const explicit = process.env.ADMIN_SESSION_SECRET;
+/**
+ * Read the HMAC secret used to sign the owner cookie. Defaults to the token
+ * itself when no separate secret is configured.
+ */
+function getCookieSecret(): string {
+  const explicit = process.env.SITE_OWNER_COOKIE_SECRET;
   if (explicit && explicit.length >= 16) return explicit;
-  const pw = process.env.ADMIN_PASSWORD;
-  if (pw && pw.length >= 16) return pw;
+  const t = process.env.SITE_OWNER_TOKEN;
+  if (t && t.length >= 16) return t;
   if (process.env.NODE_ENV !== "production") {
-    return "dev-only-session-secret-do-not-use-in-prod-32chars";
+    return "dev-only-owner-cookie-secret-do-not-use-in-prod-32chars";
   }
   throw new Error(
-    "ADMIN_SESSION_SECRET or ADMIN_PASSWORD (>=16 chars) must be set in production."
+    "SITE_OWNER_TOKEN or SITE_OWNER_COOKIE_SECRET (>=16 chars) must be set in production."
   );
 }
 
 /**
- * Verify a candidate password against the configured admin password.
- * Uses a constant-time comparison to avoid timing side-channels.
+ * Constant-time comparison of two strings.
  */
-export function verifyAdminPassword(candidate: string): boolean {
-  const expected = getAdminPassword();
-  if (!expected) return false;
-  if (typeof candidate !== "string") return false;
-  // Constant-time comparison.
-  const a = Buffer.from(candidate, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  if (a.length !== b.length) {
-    // Still do a compare to keep timing roughly constant.
-    a.compare(b);
+function safeEqual(a: string, b: string): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const ba = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ba.length !== bb.length) {
+    ba.compare(bb); // keep timing roughly constant
     return false;
   }
-  return a.compare(b) === 0;
+  return ba.compare(bb) === 0;
+}
+
+/** Verify a candidate token against the configured owner token. */
+export function verifyOwnerToken(candidate: string): boolean {
+  const expected = getOwnerToken();
+  if (!expected) return false;
+  return safeEqual(candidate, expected);
 }
 
 /**
- * Create a signed session token: `<expiresAtMs>.<base64url HMAC>`.
- * The HMAC covers expiresAtMs only (no user identity — single-admin model).
+ * Create a signed cookie value: `<issuedAtMs>.<base64url HMAC>`.
+ * The HMAC covers issuedAtMs only — single-owner model, no user identity.
  */
-async function signSession(expiresAtMs: number): Promise<string> {
-  const secret = getSessionSecret();
+async function signCookie(issuedAtMs: number): Promise<string> {
+  const secret = getCookieSecret();
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -87,7 +97,7 @@ async function signSession(expiresAtMs: number): Promise<string> {
     false,
     ["sign", "verify"]
   );
-  const payload = String(expiresAtMs);
+  const payload = String(issuedAtMs);
   const sig = await crypto.subtle.sign(
     "HMAC",
     key,
@@ -101,20 +111,21 @@ async function signSession(expiresAtMs: number): Promise<string> {
   return `${payload}.${sigB64}`;
 }
 
-/** Verify a session token's signature and expiry. Returns true if valid. */
-async function verifySession(token: string): Promise<boolean> {
-  if (!token || typeof token !== "string") return false;
-  const dot = token.indexOf(".");
+/** Verify a cookie value's signature. (No expiry — cookie is intentionally long-lived.) */
+async function verifyCookie(value: string): Promise<boolean> {
+  if (!value || typeof value !== "string") return false;
+  const dot = value.indexOf(".");
   if (dot === -1) return false;
-  const payload = token.slice(0, dot);
-  const sigB64 = token.slice(dot + 1);
-  const expiresAtMs = Number(payload);
-  if (!Number.isFinite(expiresAtMs)) return false;
-  if (expiresAtMs < Date.now()) return false;
+  const payload = value.slice(0, dot);
+  const sigB64 = value.slice(dot + 1);
+  const issuedAtMs = Number(payload);
+  if (!Number.isFinite(issuedAtMs)) return false;
+  // Sanity: issuedAt shouldn't be in the future (clock-skew tolerance: 1 day)
+  if (issuedAtMs > Date.now() + 86_400_000) return false;
 
   let secret: string;
   try {
-    secret = getSessionSecret();
+    secret = getCookieSecret();
   } catch {
     return false;
   }
@@ -125,7 +136,6 @@ async function verifySession(token: string): Promise<boolean> {
     false,
     ["verify"]
   );
-  // Reconstruct the expected signature.
   const expectedSig = await crypto.subtle.sign(
     "HMAC",
     key,
@@ -136,25 +146,20 @@ async function verifySession(token: string): Promise<boolean> {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
-  // Constant-time-ish comparison via Buffer.
-  const a = Buffer.from(sigB64, "base64");
-  const b = Buffer.from(expectedB64, "base64");
-  if (a.length !== b.length) return false;
-  return a.compare(b) === 0;
+  return safeEqual(sigB64, expectedB64);
 }
 
 /**
- * Issue a fresh admin session cookie. Call after a successful login.
- * Stores the cookie via next/headers so it works in route handlers and
- * server actions alike.
+ * Issue the owner cookie. Call after validating `?unlock=<token>`.
+ * Sets the cookie via next/headers so it works in route handlers + middleware.
  */
-export async function issueAdminSession(): Promise<void> {
-  const expiresAtMs = Date.now() + COOKIE_MAX_AGE * 1000;
-  const token = await signSession(expiresAtMs);
+export async function issueOwnerCookie(): Promise<void> {
+  const issuedAtMs = Date.now();
+  const value = await signCookie(issuedAtMs);
   const store = await cookies();
   store.set({
     name: COOKIE_NAME,
-    value: token,
+    value,
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
@@ -163,64 +168,59 @@ export async function issueAdminSession(): Promise<void> {
   });
 }
 
-/** Clear the admin session cookie (logout). */
-export async function clearAdminSession(): Promise<void> {
+/** Clear the owner cookie. Call when the owner visits `?lock=1`. */
+export async function clearOwnerCookie(): Promise<void> {
   const store = await cookies();
   store.delete(COOKIE_NAME);
 }
 
 /**
- * Check whether the current request carries a valid admin session.
- * Use this in route handlers to gate admin-only endpoints.
- *
- *   const { ok, response } = await requireAdmin(req);
- *   if (!ok) return response;
- *
- * Returns ok=true when the request is from a logged-in admin.
+ * Server-side check (for server components / route handlers reading
+ * next/headers cookies): is this visitor the site owner?
  */
-export async function requireAdmin(req: NextRequest): Promise<{
+export async function isOwnerOnServer(): Promise<boolean> {
+  try {
+    const store = await cookies();
+    const c = store.get(COOKIE_NAME)?.value;
+    if (!c) return false;
+    return await verifyCookie(c);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Route-handler check. Returns 404 (NOT 401) when not the owner — we don't
+ * want to leak the existence of admin endpoints to scrapers.
+ *
+ *   const { ok, response } = await requireOwner(req);
+ *   if (!ok) return response;
+ */
+export async function requireOwner(req: NextRequest): Promise<{
   ok: boolean;
   response?: Response;
 }> {
-  const token = req.cookies.get(COOKIE_NAME)?.value;
-  if (!token) {
+  const c = req.cookies.get(COOKIE_NAME)?.value;
+  if (!c) {
     return {
       ok: false,
       response: new Response(
-        JSON.stringify({ ok: false, error: "Unauthorized" }),
-        {
-          status: 401,
-          headers: { "content-type": "application/json" },
-        }
+        JSON.stringify({ ok: false, error: "Not found" }),
+        { status: 404, headers: { "content-type": "application/json" } }
       ),
     };
   }
-  const valid = await verifySession(token);
+  const valid = await verifyCookie(c);
   if (!valid) {
     return {
       ok: false,
       response: new Response(
-        JSON.stringify({ ok: false, error: "Invalid or expired session" }),
-        {
-          status: 401,
-          headers: { "content-type": "application/json" },
-        }
+        JSON.stringify({ ok: false, error: "Not found" }),
+        { status: 404, headers: { "content-type": "application/json" } }
       ),
     };
   }
   return { ok: true };
 }
 
-/** Same as requireAdmin but reads from next/headers cookies (server components). */
-export async function isAdminOnServer(): Promise<boolean> {
-  try {
-    const store = await cookies();
-    const token = store.get(COOKIE_NAME)?.value;
-    if (!token) return false;
-    return await verifySession(token);
-  } catch {
-    return false;
-  }
-}
-
-export { COOKIE_NAME as ADMIN_COOKIE_NAME };
+export { COOKIE_NAME as OWNER_COOKIE_NAME };

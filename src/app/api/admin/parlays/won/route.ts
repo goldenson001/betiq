@@ -1,15 +1,21 @@
 /**
  * GET /api/admin/parlays/won
  *
- * Admin-only. Returns ALL settled-and-won parlays from the entire DB history,
- * sorted by date desc (most recent first). Each row carries:
+ * Owner-only (gated by the `betiq_owner` cookie, set via `?unlock=<token>`).
+ * Returns ALL settled-and-won parlays from the entire DB history, sorted by
+ * date desc (most recent first). Each row carries:
  *   - parlay metadata (type, combinedOdds, combinedProbability, legsCount, …)
- *   - parsed legs (with matchLabel so the admin can read it without a join)
+ *   - parsed legs (with matchLabel so the owner can read it without a join)
  *   - settled evaluation (legsWon/legsLost/legsVoid, actualReturn, realizedRoi)
  *     when available from PickAudit
  *
+ * Every row returned is GUARANTEED to be:
+ *   - dated      (matchDate is a non-nullable YYYY-MM-DD string)
+ *   - settled    (evaluated=true AND won=true — never pending or in-play)
+ *   - sorted     (orderBy matchDate desc, then createdAt desc)
+ *
  * Optional query params:
- *   - limit=    cap on number of rows (default 200, max 1000)
+ *   - limit=    cap on number of rows (default 500, max 2000)
  *   - tier=     filter by parlay type (safest | medium_risk | odds_3_a | …)
  *   - since=    ISO date YYYY-MM-DD — only parlays with matchDate >= since
  *
@@ -19,7 +25,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdmin } from "@/lib/admin/auth";
+import { requireOwner } from "@/lib/admin/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -65,14 +71,14 @@ interface WonParlayView {
 }
 
 export async function GET(req: NextRequest) {
-  // ── Auth gate ─────────────────────────────────────────────────────────
-  const auth = await requireAdmin(req);
+  // ── Owner gate (404 when not unlocked — no leak) ──────────────────────
+  const auth = await requireOwner(req);
   if (!auth.ok) return auth.response!;
 
   const { searchParams } = new URL(req.url);
   const limit = Math.min(
-    1000,
-    Math.max(1, parseInt(searchParams.get("limit") ?? "200", 10) || 200)
+    2000,
+    Math.max(1, parseInt(searchParams.get("limit") ?? "500", 10) || 500)
   );
   const tier = searchParams.get("tier");
   const since = searchParams.get("since"); // YYYY-MM-DD or null

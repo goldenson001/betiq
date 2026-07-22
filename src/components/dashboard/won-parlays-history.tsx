@@ -3,18 +3,23 @@
 /**
  * WonParlaysHistory
  *
- * Admin-only component. Renders the historical record of every won parlay so
- * the admin can do human evaluation:
+ * Owner-private component (gated by the `betiq_owner` cookie server-side).
+ * Renders the historical record of every won parlay so the owner can do
+ * human evaluation:
  *   - Which tier wins most? (filterable)
  *   - How often does each leg-pattern win? (the legs are listed for each row)
  *   - What was the combined odds vs. probability vs. realized ROI?
  *
- * Data source: GET /api/admin/parlays/won (admin-gated).
+ * Data source: GET /api/admin/parlays/won (owner-gated).
  *
- * The component is intentionally self-contained — it owns its own query so it
- * only fetches when the user opens the admin tab. The query stays disabled
- * until `enabled` is true (i.e. the user is logged in as admin) so a logged-out
- * user never even fires the request.
+ * Every parlay shown is:
+ *   - DATED     (matchDate is shown as a badge on every row)
+ *   - SETTLED   (only evaluated=true AND won=true rows are returned by the API)
+ *   - SORTED    (orderBy matchDate desc, then createdAt desc — newest first)
+ *
+ * The component is intentionally self-contained — it owns its own query and
+ * behaves exactly like the Performance tab: it just shows for the owner,
+ * silently 404s for everyone else.
  */
 
 import { useMemo, useState } from "react";
@@ -53,7 +58,8 @@ import {
   Shield,
   Flame,
   Sparkles,
-  Lock,
+  CheckCircle2,
+  ArrowDownWideNarrow,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -128,16 +134,25 @@ function tierMeta(t: string) {
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
-export function WonParlaysHistory({ enabled }: { enabled: boolean }) {
+// Auto-fetches — no `enabled` flag, no lock. The owner cookie gates this
+// server-side: regular visitors get 404 from /api/admin/parlays/won and the
+// query errors out (rendered as a clean "not available" message). For the
+// site owner (who has the cookie), this behaves exactly like the Performance
+// tab — it just shows.
+export function WonParlaysHistory() {
   const [tierFilter, setTierFilter] = useState<string>("all");
   const [search, setSearch] = useState("");
 
   const query = useQuery<WonParlaysResponse>({
-    queryKey: ["admin", "parlays", "won"],
+    queryKey: ["owner", "parlays", "won"],
     queryFn: async () => {
-      const r = await fetch("/api/admin/parlays/won?limit=500");
+      const r = await fetch("/api/admin/parlays/won?limit=1000");
+      // 404 = not owner (no cookie). Surface a clean message instead of an error.
+      if (r.status === 404) {
+        throw new Error("NOT_OWNER");
+      }
       if (r.status === 401) {
-        throw new Error("Session expired — please log in again.");
+        throw new Error("Session expired — re-visit /api/owner/unlock?token=YOUR_TOKEN.");
       }
       if (!r.ok) {
         const body = (await r.json().catch(() => ({}))) as { error?: string };
@@ -145,7 +160,6 @@ export function WonParlaysHistory({ enabled }: { enabled: boolean }) {
       }
       return r.json() as Promise<WonParlaysResponse>;
     },
-    enabled,
     staleTime: 60_000,
     retry: false,
   });
@@ -207,15 +221,17 @@ export function WonParlaysHistory({ enabled }: { enabled: boolean }) {
   }, [query.data, tierFilter, search]);
 
   // ── Render ───────────────────────────────────────────────────────────
-  if (!enabled) {
+  // NOT_OWNER: visitor doesn't have the owner cookie. This only happens when
+  // a non-owner somehow navigates to the Won History tab (e.g. URL state).
+  // Show a clean "not available" message — no leak about why.
+  if (query.isError && (query.error as Error)?.message === "NOT_OWNER") {
     return (
-      <Card className="border-violet-400/30 bg-violet-500/5">
+      <Card>
         <CardContent className="py-12 text-center">
-          <Lock className="h-10 w-10 text-violet-500 mx-auto mb-3" />
-          <p className="text-sm font-medium">Admin area locked</p>
+          <Trophy className="h-10 w-10 text-muted-foreground mx-auto mb-3" />
+          <p className="text-sm font-medium">No won parlay history available</p>
           <p className="text-xs text-muted-foreground mt-1">
-            Click the <span className="font-semibold">Admin</span> button in the header
-            and enter the password to view won parlay history.
+            This view is private to the site owner.
           </p>
         </CardContent>
       </Card>
@@ -264,9 +280,21 @@ export function WonParlaysHistory({ enabled }: { enabled: boolean }) {
           <p className="text-sm font-medium">No won parlays yet</p>
           <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
             Once a parlay is settled as <strong>won</strong>, it will appear here
-            with full details — legs, odds, ML score, and settlement outcome — so
-            you can do human evaluation of which tiers and patterns win most often.
+            with full details — date, legs, odds, ML score, and settlement
+            outcome — so you can do human evaluation of which tiers and patterns
+            win most often.
           </p>
+          <div className="flex items-center justify-center gap-2 mt-4 flex-wrap">
+            <Badge variant="outline" className="text-[10px] gap-1">
+              <Calendar className="h-3 w-3" /> Dated
+            </Badge>
+            <Badge variant="outline" className="text-[10px] gap-1">
+              <CheckCircle2 className="h-3 w-3" /> Settled
+            </Badge>
+            <Badge variant="outline" className="text-[10px] gap-1">
+              <ArrowDownWideNarrow className="h-3 w-3" /> Sorted (newest first)
+            </Badge>
+          </div>
         </CardContent>
       </Card>
     );
@@ -274,6 +302,22 @@ export function WonParlaysHistory({ enabled }: { enabled: boolean }) {
 
   return (
     <div className="space-y-4">
+      {/* ── Guarantees banner ────────────────────────────────────────────── */}
+      <div className="flex items-center gap-2 flex-wrap text-[11px] text-muted-foreground">
+        <Badge variant="outline" className="gap-1 text-[10px] border-emerald-400/40 text-emerald-700 dark:text-emerald-300">
+          <Calendar className="h-3 w-3" /> Every row dated
+        </Badge>
+        <Badge variant="outline" className="gap-1 text-[10px] border-emerald-400/40 text-emerald-700 dark:text-emerald-300">
+          <CheckCircle2 className="h-3 w-3" /> Settled &amp; won only
+        </Badge>
+        <Badge variant="outline" className="gap-1 text-[10px] border-emerald-400/40 text-emerald-700 dark:text-emerald-300">
+          <ArrowDownWideNarrow className="h-3 w-3" /> Sorted by date (newest first)
+        </Badge>
+        <span className="ml-auto font-mono">
+          {query.data.count} {query.data.count === 1 ? "parlay" : "parlays"} archived
+        </span>
+      </div>
+
       {/* ── Summary stats ─────────────────────────────────────────────── */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
         <StatCard

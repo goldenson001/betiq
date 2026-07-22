@@ -42,10 +42,6 @@ import { ParlayCard, type ParlayView, parlayTypeOrder } from "@/components/dashb
 import { BankrollSimulator } from "@/components/dashboard/bankroll-simulator";
 import { PickCard } from "@/components/dashboard/pick-card";
 import { PickListSkeleton, PickTabEmpty } from "@/components/dashboard/pick-list-skeleton";
-import {
-  AdminLoginDialog,
-  AdminGateButton,
-} from "@/components/dashboard/admin-login-dialog";
 import { WonParlaysHistory } from "@/components/dashboard/won-parlays-history";
 import {
   PerformanceDashboard,
@@ -341,31 +337,34 @@ export default function Home() {
     }
   }
 
-  // ── Admin mode ──────────────────────────────────────────────────────────
-  // The user wants a private "won parlay history" view visible only to admin.
-  // We detect admin status by polling /api/admin/session on mount (the server
-  // reads its HTTP-only signed cookie — no client-side state can forge it).
-  // When logged out, the admin tab + won-history section are hidden entirely
-  // from non-admins (no extra DOM, no fetches).
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [adminLoginOpen, setAdminLoginOpen] = useState(false);
-  const [adminDisabled, setAdminDisabled] = useState(false);
+  // ── Owner mode (no login, no lock button) ───────────────────────────────
+  // The user wants the "Won Parlays History" view to behave like the
+  // Performance tab — auto-visible to them (the site owner) without any
+  // password modal or unlock button.
+  //
+  // Pattern:
+  //   - Owner visits /api/owner/unlock?token=SITE_OWNER_TOKEN ONCE per browser.
+  //     Server sets a 10-year HTTP-only signed cookie (`betiq_owner`).
+  //   - On every page load we probe /api/owner/session to check the cookie.
+  //     If present, isOwner=true → the "Won History" tab is rendered.
+  //   - Non-owner visitors never see the tab, never fire the gated fetch.
+  //   - No lock button in the header. To log out, the owner visits
+  //     /api/owner/lock on purpose.
+  const [isOwner, setIsOwner] = useState(false);
 
-  // One-shot session probe on mount: if the visitor already has a valid admin
-  // cookie (e.g. they refreshed the page mid-session), restore admin mode.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const r = await fetch("/api/admin/session");
+        const r = await fetch("/api/owner/session");
         const data = (await r.json().catch(() => ({}))) as {
-          isAdmin?: boolean;
+          isOwner?: boolean;
         };
-        if (!cancelled && typeof data.isAdmin === "boolean") {
-          setIsAdmin(data.isAdmin);
+        if (!cancelled && typeof data.isOwner === "boolean") {
+          setIsOwner(data.isOwner);
         }
       } catch {
-        // Network error — fail closed (non-admin).
+        // Network error — fail closed (non-owner).
       }
     })();
     return () => {
@@ -373,29 +372,6 @@ export default function Home() {
     };
   }, []);
 
-  // Also probe whether admin login is *available* (ADMIN_PASSWORD configured).
-  // If not, we render the admin button as disabled so a misconfigured prod
-  // deployment surfaces clearly to the site owner.
-  useEffect(() => {
-    // The /api/admin/session route returns isAdmin=false for anonymous users,
-    // and a 503 only on the login route — so we don't actually need a second
-    // probe. The login dialog itself surfaces the "disabled" message from the
-    // server. We leave `adminDisabled` always false here so the button stays
-    // clickable; the user gets a clear toast if login is unavailable.
-    setAdminDisabled(false);
-  }, []);
-
-  async function handleAdminLogout() {
-    try {
-      await fetch("/api/admin/logout", { method: "POST" });
-      setIsAdmin(false);
-      // Bounce back to matches tab so we don't sit on a now-hidden tab.
-      setActiveTab("matches");
-      toast.success("Admin logged out");
-    } catch (err) {
-      toast.error(`Logout failed: ${(err as Error).message}`);
-    }
-  }
   const [livePolling, setLivePolling] = useState(false);
   const [lastLiveUpdate, setLastLiveUpdate] = useState<Date | null>(null);
 
@@ -699,13 +675,6 @@ export default function Home() {
               <span className="hidden sm:inline">Refresh Data</span>
               <span className="sm:hidden">Sync</span>
             </Button>
-            {/* Admin gate — opens login dialog when logged-out, logs out when logged-in. */}
-            <AdminGateButton
-              isAdmin={isAdmin}
-              disabled={adminDisabled}
-              onOpenLogin={() => setAdminLoginOpen(true)}
-              onLogout={handleAdminLogout}
-            />
             {mounted && (
               <Button
                 variant="ghost"
@@ -1010,22 +979,18 @@ export default function Home() {
               <TabsTrigger value="performance" className="gap-1.5 text-xs sm:text-sm">
                 <BarChart3 className="h-3.5 w-3.5" /> Performance
               </TabsTrigger>
-              {/* Admin-only tab — only rendered when the visitor is logged in
-                  as admin. Non-admins never see this tab and the underlying
-                  WonParlaysHistory component never fires its admin-gated
-                  fetch, so historical won-parlay data stays hidden. */}
-              {isAdmin && (
+              {/* Owner-only tab — only rendered when the visitor has the
+                  betiq_owner cookie (set via /api/owner/unlock?token=...).
+                  Non-owner visitors never see this tab and the underlying
+                  WonParlaysHistory component silently 404s for them, so the
+                  historical won-parlay data stays private. Behaves exactly
+                  like the Performance tab being visible only to the owner. */}
+              {isOwner && (
                 <TabsTrigger
                   value="won-history"
                   className="gap-1.5 text-xs sm:text-sm data-[state=active]:bg-violet-600 data-[state=active]:text-white"
                 >
                   <Trophy className="h-3.5 w-3.5" /> Won History
-                  <Badge
-                    variant="secondary"
-                    className="ml-0.5 h-4 px-1 text-[9px] font-bold bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-200"
-                  >
-                    ADMIN
-                  </Badge>
                 </TabsTrigger>
               )}
             </TabsList>
@@ -1413,28 +1378,27 @@ export default function Home() {
             )}
           </TabsContent>
 
-          {/* ── Admin-only: Won Parlay History ─────────────────────────────────
-              This tab is rendered for ALL visitors (so the admin who is on the
-              tab when they log out doesn't see a blank screen — they bounce to
-              matches via handleAdminLogout). But the WonParlaysHistory
-              component itself stays in a locked state when `isAdmin` is false:
-              it shows a "locked" placeholder and never fires its admin-gated
-              fetch. Non-admin visitors who somehow navigate to this tab value
-              (e.g. via URL state) see only the locked placeholder. */}
+          {/* ── Owner-only: Won Parlay History ─────────────────────────────────
+              Tab is only rendered when the visitor has the betiq_owner cookie
+              (see the conditional TabsTrigger above). The WonParlaysHistory
+              component auto-fetches — same pattern as PerformanceDashboard.
+              Non-owner visitors never see this tab; if someone navigates to
+              the value via URL state, WonParlaysHistory will silently 404 and
+              render a "not available" placeholder. */}
           <TabsContent value="won-history" className="mt-4 space-y-4">
             <Card className="border-violet-400/30 bg-violet-500/5">
               <CardContent className="p-3 sm:p-4 flex items-start gap-2">
                 <Shield className="h-4 w-4 text-violet-600 dark:text-violet-300 mt-0.5 shrink-0" />
                 <div className="text-xs text-violet-900 dark:text-violet-100">
-                  <strong className="font-semibold">Admin-only area.</strong>{" "}
-                  Showing every settled-and-won parlay in the system history,
-                  with full leg details, ML signals, and settlement outcome.
-                  Use this view to evaluate which tiers and patterns win most
-                  often. <em>This data is not visible to non-admin visitors.</em>
+                  <strong className="font-semibold">Owner-private view.</strong>{" "}
+                  Every settled-and-won parlay in the system history, with full
+                  leg details, ML signals, and settlement outcome. Each row is
+                  dated, settled, and sorted newest-first so you can evaluate
+                  which tiers and patterns win most often.
                 </div>
               </CardContent>
             </Card>
-            <WonParlaysHistory enabled={isAdmin} />
+            <WonParlaysHistory />
           </TabsContent>
         </Tabs>
 
@@ -1484,18 +1448,6 @@ export default function Home() {
               setSelectedMatchId(null);
             }, 200);
           }
-        }}
-      />
-
-      {/* Admin login dialog */}
-      <AdminLoginDialog
-        open={adminLoginOpen}
-        onOpenChange={setAdminLoginOpen}
-        onSuccess={() => {
-          setIsAdmin(true);
-          // Jump straight to the won-history tab so the admin lands on the
-          // data they came for, without having to click again.
-          setActiveTab("won-history");
         }}
       />
 
