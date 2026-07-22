@@ -116,14 +116,14 @@ const TYPE_META: Record<
     icon: Shield,
     color: "text-emerald-500",
     border: "border-l-emerald-500",
-    blurb: "2–3 legs · each leg ≥ 75% prob · low-variance high-win-rate",
+    blurb: "2 legs · each leg ≥ 80% prob · high-win-rate accumulator",
   },
   medium_risk: {
     label: "Medium Risk",
     icon: TrendingUp,
     color: "text-blue-500",
     border: "border-l-blue-500",
-    blurb: "3–4 legs · each leg ≥ 55% prob · balanced growth",
+    blurb: "2–3 legs · each leg ≥ 60% prob · balanced growth",
   },
   high_risk: {
     label: "High Risk",

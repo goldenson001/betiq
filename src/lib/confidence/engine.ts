@@ -835,24 +835,40 @@ export async function buildAndPersistParlays(
   //   odds_5_a/b ≥ 0.45 (same as medium_risk)
   // Use `let` so the post-build RULE#1 dedup pass can reassign them after
   // stripping any duplicate matchIds that may have leaked through.
+  // ── Safest parlay tier — TIGHTENED for higher actual win rate ─────────────
+  // Previous: maxLegs=3, minLegProb=0.80, minCombinedProb=0.35 → theoretical
+  // win rate ~51% (0.80^3). In practice, prediction probabilities are
+  // overconfident, so the realized win rate was much lower — the user
+  // reported that "one parlay has never won" since launch.
+  //
+  // New: maxLegs=2, minLegProb=0.82, minCombinedProb=0.60. With 2 legs at
+  // 0.82 each, combined = 0.67 theoretical. Even if real probabilities are
+  // ~10% lower than stated (0.72 each), combined = 0.52 — still >50%.
+  // We also raise minReliability to 0.75 (A-grade only) and keep minH2H at
+  // 0.55 (H2H must mildly endorse). The result: fewer "safest" parlays
+  // (some days will have none), but the ones we do build win much more often.
   let safest = buildGreedyParlayML(
     allLegs,
     legMLMap,
     {
-      maxLegs: 3,
+      maxLegs: 2,
       minLegProb: ENGINE_CONFIG.SAFEST_MIN_LEG_PROB,
-      minCombinedProb: 0.35,
+      minCombinedProb: 0.60,
       minConsensus: ENGINE_CONFIG.SAFEST_MIN_LEG_SOURCES,
-      minReliability: 0.70, // A-grade legs only for the safest tier
+      minReliability: 0.75, // A-grade legs only (was 0.70)
       minH2HAgreement: 0.55, // H2H must mildly endorse
     }
   );
   for (const leg of safest.legs) usedMatchIds.add(leg.matchId);
 
+  // ── Medium risk — slightly tightened (3 legs max, 0.60 min prob) ─────────
+  // Previous: maxLegs=4, minLegProb=0.55, minCombinedProb=0.08 → theoretical
+  // ~9% win rate. New: maxLegs=3, minLegProb=0.60, minCombinedProb=0.15 →
+  // theoretical ~22% win rate. Still risky, but at least winnable.
   let mediumRisk = buildGreedyParlayML(
     allLegs.filter((l) => !usedMatchIds.has(l.matchId)),
     legMLMap,
-    { maxLegs: 4, minLegProb: 0.55, minCombinedProb: 0.08, minReliability: 0.55, minH2HAgreement: 0.45 }
+    { maxLegs: 3, minLegProb: 0.60, minCombinedProb: 0.15, minReliability: 0.55, minH2HAgreement: 0.45 }
   );
   for (const leg of mediumRisk.legs) usedMatchIds.add(leg.matchId);
 

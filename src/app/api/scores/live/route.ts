@@ -206,7 +206,8 @@ export async function GET(req: NextRequest): Promise<NextResponse<ScoresLiveResp
     orderBy: { type: "asc" },
   });
 
-  const parlayViews: ParlayLiveView[] = parlays.map((p) => {
+  const parlayViews: ParlayLiveView[] = [];
+  for (const p of parlays) {
     let legs: Array<{
       predictionId: string;
       matchId: string;
@@ -277,7 +278,36 @@ export async function GET(req: NextRequest): Promise<NextResponse<ScoresLiveResp
     const allDecided = legsPending === 0 && legs.length > 0;
     const parlayWon = allDecided && !busted;
 
-    return {
+    // ── Auto-settle parlays in DB when all legs are decided ───────────────
+    // WHY: On serverless deployments (Vercel), the daily feedback cron may
+    // fail or be delayed, leaving parlays stuck at `evaluated: false` even
+    // after all their matches have finished. This makes the dashboard show
+    // "PENDING" forever on parlays that have actually won or lost.
+    //
+    // WHAT: When the live-scores endpoint computes that every leg of a parlay
+    // is decided (match finished with final score), we persist the evaluation
+    // to the DB right here. This way, even if the cron never runs, parlays
+    // settle as soon as ANY user views the dashboard after the matches finish.
+    //
+    // SAFETY: Only updates parlays that are still `evaluated: false`. Already-
+    // evaluated parlays are left untouched (idempotent). We don't run the full
+    // feedback loop (source weight updates, Brier, CLV, etc.) here — that's
+    // still the cron's job. We just mark the parlay's won/lost flag so the UI
+    // reflects reality.
+    if (allDecided && !p.evaluated) {
+      try {
+        await db.parlay.update({
+          where: { id: p.id },
+          data: { evaluated: true, won: parlayWon },
+        });
+      } catch (err) {
+        // Non-fatal — log and continue. The live status is still returned to
+        // the UI even if the DB write fails.
+        console.error(`[scores/live] Failed to auto-settle parlay ${p.id}:`, err);
+      }
+    }
+
+    parlayViews.push({
       id: p.id,
       type: p.type,
       legsCount: p.legsCount,
@@ -288,8 +318,8 @@ export async function GET(req: NextRequest): Promise<NextResponse<ScoresLiveResp
       won: parlayWon,
       hasLiveLeg,
       legs: legStatuses,
-    };
-  });
+    });
+  }
 
   // ── Counts ─────────────────────────────────────────────────────────────
   const counts = {

@@ -33,6 +33,7 @@ import {
   AlertTriangle,
   Activity,
   Radio,
+  X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { MatchCard, type MatchView } from "@/components/dashboard/match-card";
@@ -302,6 +303,38 @@ export default function Home() {
   // streaming. They can toggle it off in the header.
   const [liveRefreshEnabled, setLiveRefreshEnabled] = useState(true);
   const [liveData, setLiveData] = useState<ScoresLiveResponse | null>(null);
+
+  // ── Info banner dismiss state ───────────────────────────────────────────
+  // The "Live ESPN data" banner is informational and only needs to be seen
+  // once per session. After the user dismisses it (or after 12 seconds
+  // auto-dismiss), it stays hidden until the next session. Stored in
+  // sessionStorage so a fresh tab always shows it at least once.
+  const [infoBannerDismissed, setInfoBannerDismissed] = useState(false);
+  useEffect(() => {
+    try {
+      if (typeof window !== "undefined" && window.sessionStorage.getItem("betiq_info_banner_dismissed") === "1") {
+        setInfoBannerDismissed(true);
+      }
+    } catch {
+      // sessionStorage may throw in some privacy modes — fail silently.
+    }
+    // Auto-dismiss after 12 seconds the first time the user sees it.
+    if (!infoBannerDismissed) {
+      const t = setTimeout(() => dismissInfoBanner(), 12_000);
+      return () => clearTimeout(t);
+    }
+  }, []);
+
+  function dismissInfoBanner() {
+    setInfoBannerDismissed(true);
+    try {
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem("betiq_info_banner_dismissed", "1");
+      }
+    } catch {
+      // ignore
+    }
+  }
   const [livePolling, setLivePolling] = useState(false);
   const [lastLiveUpdate, setLastLiveUpdate] = useState<Date | null>(null);
 
@@ -464,6 +497,20 @@ export default function Home() {
     return () => clearInterval(id);
   }, [liveRefreshEnabled, date, pollLiveScores]);
 
+  // ── One-shot live-scores poll on initial mount ──────────────────────────
+  // Even when the user has auto-refresh OFF, we still want to:
+  //   1. Pull fresh scores once on page load (so finished matches show their
+  //      real scores instead of "TBP")
+  //   2. Auto-settle any parlays whose legs are all decided (the
+  //      /api/scores/live endpoint now persists parlay evaluation when all
+  //      legs are finished — this is the safety net for when the daily
+  //      feedback cron doesn't run on serverless)
+  // Subsequent polls only happen if the user turns auto-refresh back ON.
+  useEffect(() => {
+    pollLiveScores();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Mutations ───────────────────────────────────────────────────────────
   const triggerPipeline = useMutation({
     mutationFn: async (phase: string) => {
@@ -608,16 +655,28 @@ export default function Home() {
 
       {/* Main */}
       <main className="flex-1 container mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-4 sm:space-y-5">
-        {/* Live data banner */}
-        <div className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-xs flex items-start gap-2">
-          <Info className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0" />
-          <div className="text-emerald-900 dark:text-emerald-200">
-            <strong className="font-semibold">Live ESPN data.</strong> Today's fixtures, team form, head-to-head records,
-            and DraftKings odds are pulled in real time from the ESPN Soccer API. PredictZ, WinDrawWin, and StatArea
-            consensus predictions are layered on top when reachable. The confidence engine, parlay builder, value-bet
-            finder, and self-learning feedback loop all run end-to-end on the resulting data.
+        {/* Live data banner — dismissible (auto-dismiss after 12s or click X).
+            Persists dismissal in sessionStorage so it stays gone for the session. */}
+        {!infoBannerDismissed && (
+          <div className="rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-2 text-xs flex items-start gap-2 animate-in fade-in slide-in-from-top-2 duration-300">
+            <Info className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0" />
+            <div className="text-emerald-900 dark:text-emerald-200 flex-1">
+              <strong className="font-semibold">Live ESPN data.</strong> Today's fixtures, team form, head-to-head records,
+              and DraftKings odds are pulled in real time from the ESPN Soccer API. PredictZ, WinDrawWin, and StatArea
+              consensus predictions are layered on top when reachable. The confidence engine, parlay builder, value-bet
+              finder, and self-learning feedback loop all run end-to-end on the resulting data.
+            </div>
+            <button
+              type="button"
+              onClick={dismissInfoBanner}
+              aria-label="Dismiss info banner"
+              className="shrink-0 ml-1 p-1 rounded-md text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 transition-colors"
+              title="Dismiss (auto-hides in 12s)"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
-        </div>
+        )}
 
         {/* Live scores status banner — shows when auto-refresh is ON */}
         {liveRefreshEnabled && liveData && (
