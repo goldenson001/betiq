@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { brusselsDateString } from "@/lib/time/brussels";
+import { isSafeHighOddsPick } from "@/lib/prediction/safe-high-odds";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -134,8 +135,34 @@ export async function GET(req: NextRequest) {
   // positive Kelly, safe market. These are surfaced in the dedicated
   // "Safe High-Odds" tab. Sort by edge desc (best value first), break ties
   // by odds desc (highest return first).
-  const safeHighOddsPicks = predictions
-    .filter((p) => p.isSafeHighOdds)
+  //
+  // ── On-the-fly re-evaluation ──────────────────────────────────────────────
+  // The DB-stored `isSafeHighOdds` flag is a snapshot from when the prediction
+  // was first generated. If the admin later relaxes SAFE_HIGH_ODDS_* config
+  // thresholds (e.g. lowering MIN_SOURCES from 2 → 1), existing predictions
+  // won't have the flag set and the tab would stay empty until a `?force=true`
+  // pipeline re-run. To provide immediate relief, we re-evaluate the criteria
+  // here using the CURRENT config — so users see picks as soon as the config
+  // change ships, without needing an admin trigger.
+  //
+  // We OR the DB flag with the on-the-fly evaluation: a pick is shown if EITHER
+  // the engine originally flagged it OR the current config says it qualifies.
+  // This ensures we never HIDE a pick that was previously shown (immutability
+  // of the user's view), while still being able to SHOW new picks when config
+  // is relaxed.
+  //
+  // The CLV gate is skipped here (no marketLeagueClv map loaded) — this
+  // matches the engine's behavior on a fresh DB and is the safer default
+  // (don't hide picks based on CLV data the API route doesn't have).
+  const safeHighOddsEvaluated = predictions.map((p) => ({
+    p,
+    qualifies:
+      p.isSafeHighOdds ||
+      isSafeHighOddsPick(p, { leagueId: p.match?.league?.id ?? null }),
+  }));
+  const safeHighOddsPicks = safeHighOddsEvaluated
+    .filter((x) => x.qualifies)
+    .map((x) => x.p)
     .sort((a, b) => (b.edge ?? 0) - (a.edge ?? 0) || (b.bookOdds ?? 0) - (a.bookOdds ?? 0))
     .slice(0, 10);
 
@@ -169,7 +196,7 @@ export async function GET(req: NextRequest) {
       topPicksCount: predictions.filter((p) => p.isTopPick).length,
       valueBetsCount: allValueByMatch.size,
       safePicksCount: allSafeByMatch.size,
-      safeHighOddsCount: predictions.filter((p) => p.isSafeHighOdds).length,
+      safeHighOddsCount: safeHighOddsEvaluated.filter((x) => x.qualifies).length,
     },
     // ── C1: Risk gate info for the bankroll simulator + UI banner ──────────────
     riskGate: {
@@ -234,6 +261,8 @@ export async function GET(req: NextRequest) {
     safeHighOddsPicks: safeHighOddsPicks.map((p) => ({
       id: p.id,
       match: `${p.match.homeTeam} v ${p.match.awayTeam}`,
+      league: p.match.league?.name ?? null,
+      kickoffBrussels: p.match.kickoffBrussels ?? null,
       market: p.market,
       selection: p.selection,
       confidence: p.confidence,
@@ -241,6 +270,7 @@ export async function GET(req: NextRequest) {
       bookOdds: p.bookOdds,
       edge: p.edge,
       isSafePick: p.isSafePick,
+      isSafeHighOdds: true,
       consensusSources: p.consensusSources,
       disagreement: p.disagreement,
       recommendedStake: p.recommendedStake,

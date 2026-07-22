@@ -221,10 +221,16 @@ interface EspnH2HGame {
   date?: string;
   competitions?: {
     competitors?: {
-      homeAway: "home" | "away";
+      homeAway?: "home" | "away";
       winner?: boolean;
-      score?: string;
-      team?: { displayName?: string; abbreviation?: string; logo?: string };
+      score?: string | number | null;
+      team?: {
+        displayName?: string;
+        shortDisplayName?: string;
+        name?: string;
+        abbreviation?: string;
+        logo?: string;
+      };
     }[];
     status?: { type?: { state?: string; completed?: boolean } };
   }[];
@@ -376,10 +382,25 @@ function parseH2H(headToHeadGames: unknown): H2HSummary | null {
     if (!comp?.competitors || comp.competitors.length < 2) continue;
     const homeC = comp.competitors.find((c) => c.homeAway === "home") ?? comp.competitors[0];
     const awayC = comp.competitors.find((c) => c.homeAway === "away") ?? comp.competitors[1];
-    if (!homeC?.team?.displayName || !awayC?.team?.displayName) continue;
+    // Tolerant team-name resolution — some leagues (e.g. Brasileirão) omit
+    // `displayName` on H2H competitors but populate `name`, `shortDisplayName`,
+    // or `abbreviation`. Fall through the chain so we don't silently drop games.
+    const homeTeam = homeC?.team;
+    const awayTeam = awayC?.team;
+    const homeName =
+      homeTeam?.displayName ??
+      homeTeam?.shortDisplayName ??
+      homeTeam?.name ??
+      homeTeam?.abbreviation;
+    const awayName =
+      awayTeam?.displayName ??
+      awayTeam?.shortDisplayName ??
+      awayTeam?.name ??
+      awayTeam?.abbreviation;
+    if (!homeName || !awayName) continue;
 
-    const homeScore = homeC.score ? parseInt(homeC.score, 10) : 0;
-    const awayScore = awayC.score ? parseInt(awayC.score, 10) : 0;
+    const homeScore = homeC.score ? parseInt(String(homeC.score), 10) : 0;
+    const awayScore = awayC.score ? parseInt(String(awayC.score), 10) : 0;
     if (Number.isNaN(homeScore) || Number.isNaN(awayScore)) continue;
 
     let result: "home" | "away" | "draw";
@@ -389,8 +410,8 @@ function parseH2H(headToHeadGames: unknown): H2HSummary | null {
 
     matches.push({
       date: game.date ?? null,
-      homeTeam: homeC.team.displayName,
-      awayTeam: awayC.team.displayName,
+      homeTeam: homeName,
+      awayTeam: awayName,
       homeScore,
       awayScore,
       result,

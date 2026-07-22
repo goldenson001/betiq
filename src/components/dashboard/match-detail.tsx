@@ -210,7 +210,7 @@ export function MatchDetailDialog({ match, open, onOpenChange }: Props) {
             )}
 
             {/* Head-to-head */}
-            {h2h && h2h.totalGames > 0 && (
+            {h2h && h2h.totalGames > 0 ? (
               <div className="rounded-md border border-border/50 p-3">
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -249,6 +249,18 @@ export function MatchDetailDialog({ match, open, onOpenChange }: Props) {
                     </div>
                   ))}
                 </div>
+              </div>
+            ) : (
+              <div className="rounded-md border border-dashed border-border/40 p-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">
+                  Head-to-Head
+                </h3>
+                <p className="text-xs text-muted-foreground italic">
+                  No head-to-head history available for this fixture. ESPN does not
+                  publish previous-meetings data for every league (coverage is thinner
+                  for some South American and lower-tier competitions); the prediction
+                  engine automatically reallocates weight to form + Poisson signals.
+                </p>
               </div>
             )}
 

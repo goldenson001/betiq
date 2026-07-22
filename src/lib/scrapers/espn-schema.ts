@@ -160,11 +160,17 @@ const espnOddsEntrySchema = z.object({
 }).passthrough();
 
 const espnH2HCompetitorSchema = z.object({
-  homeAway: z.enum(["home", "away"]),
+  // Optional (not required) — some leagues (e.g. Brasileirão) populate H2H
+  // games without the `homeAway` field, or use neutral-venue values that
+  // don't match the strict enum. Making this optional lets the schema parse
+  // succeed so the parsed path (not just the raw fallback) can handle them.
+  homeAway: z.enum(["home", "away"]).optional(),
   winner: z.boolean().optional(),
   score: z.union([z.string(), z.number(), z.null()]).optional(),
   team: z.object({
     displayName: z.string().optional(),
+    shortDisplayName: z.string().optional(),
+    name: z.string().optional(),
     abbreviation: z.string().optional(),
     logo: z.string().optional(),
   }).passthrough().optional(),

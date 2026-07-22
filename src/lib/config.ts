@@ -61,9 +61,13 @@ export const ENGINE_CONFIG = {
   //   1. Bookmaker odds in [SAFE_HIGH_ODDS_MIN_ODDS, SAFE_HIGH_ODDS_MAX_ODDS]
   //      (default 1.50–2.50 — meaningful upside without entering longshot zone)
   //   2. Probability ≥ SAFE_HIGH_ODDS_MIN_PROB (default 0.42 — still safe side)
-  //   3. Multi-source consensus ≥ SAFE_HIGH_ODDS_MIN_SOURCES (default 2 — no
-  //      single-source picks allowed; broad agreement required)
-  //   4. Edge ≥ SAFE_HIGH_ODDS_MIN_EDGE (default 4% — well above noise floor)
+  //   3. Multi-source consensus ≥ SAFE_HIGH_ODDS_MIN_SOURCES (default 1 — was 2,
+  //      relaxed because many leagues (e.g. Brasileirão) are only covered by a
+  //      single reliable source, which would otherwise leave the Safe High-Odds
+  //      tab permanently empty)
+  //   4. Edge ≥ SAFE_HIGH_ODDS_MIN_EDGE (default 2% — was 4%, relaxed because
+  //      synthetic odds include a ~5% bookmaker margin that makes 4% nearly
+  //      unachievable when no real bookmaker odds are available)
   //   5. Kelly stake > 0 (positive expected value)
   //   6. Safe market only — 1X2, O/U 2.5/3.5, BTTS, AH, Double Chance
   //      (excludes correct_score, htft, bet_builder, win_btts which are too
@@ -71,8 +75,8 @@ export const ENGINE_CONFIG = {
   SAFE_HIGH_ODDS_MIN_ODDS: num("SAFE_HIGH_ODDS_MIN_ODDS", 1.50, 1.10, 3.0),
   SAFE_HIGH_ODDS_MAX_ODDS: num("SAFE_HIGH_ODDS_MAX_ODDS", 2.50, 1.50, 5.0),
   SAFE_HIGH_ODDS_MIN_PROB: num("SAFE_HIGH_ODDS_MIN_PROB", 0.42, 0.20, 0.70),
-  SAFE_HIGH_ODDS_MIN_SOURCES: num("SAFE_HIGH_ODDS_MIN_SOURCES", 2, 1, 5),
-  SAFE_HIGH_ODDS_MIN_EDGE: num("SAFE_HIGH_ODDS_MIN_EDGE", 0.04, 0.0, 0.30),
+  SAFE_HIGH_ODDS_MIN_SOURCES: num("SAFE_HIGH_ODDS_MIN_SOURCES", 1, 1, 5),
+  SAFE_HIGH_ODDS_MIN_EDGE: num("SAFE_HIGH_ODDS_MIN_EDGE", 0.02, 0.0, 0.30),
 
   // ── Top-pick selection ─────────────────────────────────────────────────────
   // Min probability for a pick to be eligible as a top pick.

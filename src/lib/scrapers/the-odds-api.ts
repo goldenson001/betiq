@@ -93,8 +93,14 @@ export async function scrapeTheOddsApi(targetDate?: string): Promise<ScrapeResul
       return emptyScrapeResult(SOURCE, startedAt, "No soccer sports available");
     }
 
-    // Step 2: Fetch odds for each soccer sport (limit to top 8 to save API quota)
-    const topSports = soccerSports.slice(0, 8);
+    // Step 2: Fetch odds for each soccer sport.
+    // Configurable via THE_ODDS_API_SPORTS_LIMIT env var — default 20 covers
+    // the major European leagues + South American leagues (Brasileirão,
+    // Argentine Primera, MLS, etc.) that were previously missed by the
+    // hard-coded slice(0, 8) cap. Lower this if you need to conserve API
+    // quota (each sport fetched costs ~10-20 quota units per scrape).
+    const sportsLimit = Number(process.env.THE_ODDS_API_SPORTS_LIMIT ?? "20");
+    const topSports = soccerSports.slice(0, Number.isFinite(sportsLimit) ? sportsLimit : 20);
     const matches: ScrapedMatchData[] = [];
 
     const responses = await Promise.allSettled(

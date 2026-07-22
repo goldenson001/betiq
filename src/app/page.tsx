@@ -241,6 +241,8 @@ interface StatsResponse {
   safeHighOddsPicks?: Array<{
     id: string;
     match: string;
+    league?: string | null;
+    kickoffBrussels?: string | null;
     market: string;
     selection: string;
     confidence: number;
@@ -248,6 +250,7 @@ interface StatsResponse {
     bookOdds: number | null;
     edge: number | null;
     isSafePick?: boolean;
+    isSafeHighOdds?: boolean;
     consensusSources?: number;
     disagreement?: number | null;
     recommendedStake?: number | null;
@@ -1064,7 +1067,7 @@ export default function Home() {
                   <p className="text-sm font-medium">No Safe High-Odds picks available for {date}</p>
                   <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
                     Safe High-Odds picks combine higher odds (1.50–2.50) with all safety
-                    precautions: multi-source consensus (≥2), strong edge (≥4%), positive
+                    precautions: at least 1 source consensus, positive edge (≥2%), positive
                     recommended stake, and safe markets only (1X2, O/U 2.5/3.5, BTTS, Asian
                     Handicap, Double Chance, Draw No Bet).
                   </p>
@@ -1086,30 +1089,48 @@ export default function Home() {
                     {statsQuery.data.stats.safeHighOddsCount} total
                   </Badge>
                 </div>
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   {statsQuery.data.safeHighOddsPicks.map((v) => (
-                    <PredictionRow
-                      key={v.id}
-                      p={{
-                        id: v.id,
-                        market: v.market,
-                        selection: v.selection,
-                        confidence: v.confidence,
-                        probability: v.probability ?? 0,
-                        fairOdds: v.bookOdds ?? 0,
-                        bookOdds: v.bookOdds,
-                        edge: v.edge,
-                        isTopPick: false,
-                        isValueBet: true,
-                        isSafePick: v.isSafePick,
-                        isSafeHighOdds: true,
-                        consensusSources: v.consensusSources,
-                        disagreement: v.disagreement,
-                        sourcesJson: null,
-                        recommendedStake: v.recommendedStake,
-                        clv: v.clv,
-                      }}
-                    />
+                    <div key={v.id} className="rounded-md border border-cyan-500/30 bg-cyan-500/5 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2 mb-1.5 text-[11px] text-muted-foreground">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <Clock className="h-3 w-3 shrink-0" />
+                          <span className="font-mono font-medium">{v.kickoffBrussels ?? "—"}</span>
+                          <span>·</span>
+                          <span className="truncate">{v.league ?? "—"}</span>
+                        </div>
+                        <Badge
+                          variant="outline"
+                          className="text-[9px] h-4 px-1 font-semibold border-cyan-400 text-cyan-600 dark:text-cyan-300"
+                        >
+                          SAFE HI-ODDS
+                        </Badge>
+                      </div>
+                      <div className="font-semibold text-xs mb-1.5 truncate">{v.match}</div>
+                      <PredictionRow
+                        key={v.id}
+                        p={{
+                          id: v.id,
+                          market: v.market,
+                          selection: v.selection,
+                          confidence: v.confidence,
+                          probability: v.probability ?? 0,
+                          fairOdds: v.bookOdds ?? 0,
+                          bookOdds: v.bookOdds,
+                          edge: v.edge,
+                          isTopPick: false,
+                          isValueBet: true,
+                          isSafePick: v.isSafePick,
+                          isSafeHighOdds: true,
+                          consensusSources: v.consensusSources,
+                          disagreement: v.disagreement,
+                          sourcesJson: null,
+                          recommendedStake: v.recommendedStake,
+                          clv: v.clv,
+                        }}
+                        compact
+                      />
+                    </div>
                   ))}
                   <p className="text-xs text-muted-foreground italic text-center pt-2">
                     Showing top {statsQuery.data.safeHighOddsPicks.length} investment-grade

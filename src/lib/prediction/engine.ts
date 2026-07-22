@@ -18,6 +18,7 @@ import { loadEloProbability, DEFAULT_ELO } from "@/lib/learning/elo";
 import { fitGoalModel, goalModelOverUnder, goalModelBtts, goalModelCorrectScore, goalModelMostLikelyScore, goalModel1X2, type GoalModelFit } from "./poisson";
 import { h2hProbability } from "./h2h";
 import { formProbability } from "./form-model";
+import { isSafeHighOddsPick } from "./safe-high-odds";
 import { ENGINE_CONFIG } from "@/lib/config";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1758,46 +1759,15 @@ export function buildPredictionsForMatch(ctx: MatchContext): EnginePrediction[] 
   // clear the value-bet thresholds). The isSafeHighOdds flag is a STRICTER
   // subset — UI shows them in a dedicated tab so users can find higher-odds
   // investment-grade picks at a glance.
-  const SAFE_HIGH_ODDS_MARKETS = new Set([
-    "1x2",
-    "ou25",
-    "ou35",
-    "btts",
-    "asian_handicap",
-    "double_chance",
-    "dnb",
-  ]);
   for (const p of preds) {
-    if (!SAFE_HIGH_ODDS_MARKETS.has(p.market)) continue;
-    const odds = p.bookOdds ?? 0;
-    if (odds < ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_ODDS) continue;
-    if (odds > ENGINE_CONFIG.SAFE_HIGH_ODDS_MAX_ODDS) continue;
-    if (p.probability < ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_PROB) continue;
-    if ((p.consensusSources ?? 0) < ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_SOURCES) continue;
-    if ((p.edge ?? 0) < ENGINE_CONFIG.SAFE_HIGH_ODDS_MIN_EDGE) continue;
-    // ── B3: CLV gate — exclude (market, league) combos we systematically lose ──
-    if (ctx.marketLeagueClv) {
-      const leagueId = ctx.leagueId ?? "none";
-      const clvKey = `${p.market}|${leagueId}`;
-      const mlClv = ctx.marketLeagueClv.get(clvKey);
-      if (mlClv !== undefined && mlClv < ENGINE_CONFIG.MARKET_LEAGUE_MIN_CLV) {
-        continue;
-      }
-    }
-    // ── C2: Disagreement gate — exclude "lottery" picks ───────────────────────
-    if (p.disagreement !== undefined && p.disagreement > ENGINE_CONFIG.SAFE_HIGH_ODDS_MAX_DISAGREEMENT) {
-      continue;
-    }
-    // Kelly check — full Kelly must be positive (positive expected value)
-    if (p.bookOdds && p.bookOdds > 1) {
-      const k = kellyStake(p.probability, p.bookOdds);
-      if (k.fullKelly <= 0) continue;
-    } else {
-      continue;
-    }
+    if (!isSafeHighOddsPick(p, {
+      marketLeagueClv: ctx.marketLeagueClv,
+      leagueId: ctx.leagueId ?? null,
+    })) continue;
     p.isSafeHighOdds = true;
-    // Safe high-odds picks are ALSO value bets (they clear all value-bet
-    // thresholds by construction: edge ≥ 4% > 2.5%, prob in band, sources ≥ 2).
+    // Safe high-odds picks are ALSO value bets — ensure they appear in both
+    // tabs even when edge is between 2% (safe-high-odds threshold) and 2.5%
+    // (value-bet threshold). When edge ≥ 2.5% they're already flagged above.
     if (!p.isValueBet) p.isValueBet = true;
   }
 
