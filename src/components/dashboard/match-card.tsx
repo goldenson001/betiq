@@ -2,7 +2,7 @@
 
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ChevronRight, Clock, ChevronDown } from "lucide-react";
+import { ChevronRight, Clock } from "lucide-react";
 import { PredictionRow, type PredictionView } from "./prediction-row";
 import { cn } from "@/lib/utils";
 
@@ -88,9 +88,12 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
                 {valueBetsCount} VALUE
               </Badge>
             )}
+            {/* Status-only indicator — the actual score lives in the center
+                score-block below (between the team names). Showing the score
+                in BOTH the header pill and the center block was redundant. */}
             {hasResult && (
               <Badge variant="secondary" className="text-[10px] font-semibold">
-                FT {match.homeScore}-{match.awayScore}
+                FT
               </Badge>
             )}
             {isLive && (
@@ -103,7 +106,7 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
                   <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-rose-500"></span>
                 </span>
-                LIVE {match.homeScore}-{match.awayScore}
+                LIVE
               </Badge>
             )}
             {!hasResult && !isLive && (
@@ -237,18 +240,6 @@ export function MatchCard({ match, onOpen }: MatchCardProps) {
             ))}
         </div>
 
-        {/* Footer hint */}
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpen(match);
-          }}
-          className="mt-2 w-full text-[11px] text-primary hover:text-primary/80 font-medium flex items-center justify-center gap-1 py-1 border-t border-border/50 pt-2"
-        >
-          <ChevronDown className="h-3 w-3" />
-          View source breakdown & expert consensus
-        </button>
       </CardContent>
     </Card>
   );
